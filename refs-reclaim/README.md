@@ -16,6 +16,12 @@ Pipeline: `plan` (read-only) → `archive` (bundle + verify + sha256) → `apply
   the worktree is removed.
 - Only `origin/*` is used as the baseline; `git fetch --prune` runs first.
 
+## Platform
+
+`plan`/`archive`/`apply` work wherever git does, but the in-use scan reads
+`/proc`. On macOS it is unavailable, so `apply` fails closed; `--force-unsafe`
+skips that check and is not recommended.
+
 ## Classification
 
 - `T1`: safe to delete.

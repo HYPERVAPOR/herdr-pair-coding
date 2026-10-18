@@ -1,7 +1,8 @@
 # herdr-pair-coding
 
-Worker–reviewer pair coding on top of [herdr](https://herdr.dev): one agent
-writes, another reviews, each in its own pane.
+Linux and macOS (Windows via WSL). Worker–reviewer pair coding on top of
+[herdr](https://herdr.dev): one agent writes, another reviews, each in its own
+pane.
 
 ## How It Works
 

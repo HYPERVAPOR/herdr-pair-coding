@@ -5,6 +5,9 @@ description: "Set up or operate herdr-pair-coding: worker-reviewer pair coding o
 
 # herdr-pair-coding setup
 
+Runs on Linux and macOS; on Windows use WSL. herdr is Unix (Windows is preview),
+and refs-reclaim's in-use scan needs Linux `/proc`.
+
 Goal: two panes, `worker` and `reviewer`, each running an agent, plus a
 watchdog that nudges the pair when it stalls.
 
@@ -82,7 +85,8 @@ ln -sfn "$P/herdr-watchdog/herdr-watchdog"       ~/.local/bin/herdr-watchdog
 ln -sfn "$P/herdr-last-answer/herdr-last-answer" ~/.local/bin/herdr-last-answer
 ln -sfn "$P/refs-reclaim/refs-reclaim"           ~/.local/bin/refs-reclaim
 
-# Debian does not put ~/.local/bin on PATH. Make it stick for later shells.
+# Most systems do not put ~/.local/bin on PATH (Debian included).
+# bash: ~/.bashrc. macOS uses zsh by default: append the same line to ~/.zshrc.
 grep -q 'pi/agent/bin' ~/.bashrc 2>/dev/null || \
   printf '%s\n' 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"' >> ~/.bashrc
 
@@ -172,7 +176,7 @@ before that.
 herdr-watchdog daemon
 ```
 
-As a systemd user service:
+On Linux, as a systemd user service:
 
 ```ini
 [Unit]
@@ -195,6 +199,9 @@ systemctl --user daemon-reload
 systemctl --user enable --now herdr-watchdog
 herdr-watchdog top        # read-only live view
 ```
+
+macOS has no systemd: run `herdr-watchdog daemon` in a terminal, or under
+launchd.
 
 The daemon only reads pane state and sends messages. `~/.herdr/watchdog/PAUSE`
 pauses it. The watchdog is the only waiter: agents must not poll (`herdr agent
@@ -226,6 +233,9 @@ CLI checks:
 - Watchdog finds no pair: the pane labels must contain `worker` and `reviewer`.
 - Watchdog cannot find `herdr` under systemd: add `~/.local/bin` to the unit's
   `PATH`.
+- `refs-reclaim apply` refuses on macOS: its in-use scan reads `/proc`, which
+  macOS does not have, so it fails closed. `plan`/`archive` still work;
+  `--force-unsafe` skips the scan and is not recommended.
 - `refs-reclaim` is not a tool in the profiles by default; mount
   `refs-reclaim/reclaim.ts` and add `refs_reclaim` to `--tools` only where the
   user wants cleanup.

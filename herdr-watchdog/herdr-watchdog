@@ -115,6 +115,19 @@ def flag_path(session, tab):
     return os.path.join(HB_DIR, "%s__%s.json" % (session, tab))
 
 
+def pid_alive(pid):
+    """Liveness without /proc (macOS has none): signal 0 only checks existence."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, owned by another user
+    except OSError:
+        return False
+    return True
+
+
 def read_flag(session, tab):
     """-> dict / None (missing file, or unreadable: treat unreadable as false, never crash)"""
     try:
@@ -697,7 +710,7 @@ def top_draw(scr, attrs=None):
     pid = (snap or {}).get("pid")
     if not snap:
         who = "no snapshot yet"
-    elif pid and os.path.exists("/proc/%d" % pid):
+    elif pid and pid_alive(pid):
         who = "pid %d" % pid
     else:
         who = "daemon gone (pid %s died)" % pid
