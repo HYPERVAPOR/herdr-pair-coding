@@ -72,20 +72,15 @@ mkdir -p ~/.pi/agent/profiles
 cp "$P"/examples/profiles/*.conf "$P"/examples/profiles/*.md.example ~/.pi/agent/profiles/
 ```
 
-Each `.conf` sets a `PROFILE` array; a small shell function runs it:
+Each `.conf` sets a `PROFILE` array. The `bin/pi-profile` script sources it and
+starts pi:
 
 ```bash
-pi-profile() {
-  local f="$HOME/.pi/agent/profiles/$1.conf"
-  [ -r "$f" ] || { echo "no such profile: $f" >&2; return 1; }
-  . "$f"
-  command pi -ne -ns -np --no-mcp $PROFILE "${@:2}"
-}
+ln -sfn "$P/bin/pi-profile" ~/.local/bin/pi-profile
+pi-profile worker
 ```
 
-This is a shell function, not an installed command. Define it in the shell that
-starts pi, or add it to `~/.bashrc`. `.` works in bash and POSIX sh; `source`
-does not work in dash.
+`~/.local/bin` must be on `PATH`; the CLI links in step 3 use the same directory.
 
 - `-ne` no discovered extensions, `-ns` no skills, `-np` no prompt templates,
   `--no-mcp` no MCP servers: the profile mounts exactly what it lists.

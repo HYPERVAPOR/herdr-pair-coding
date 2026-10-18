@@ -13,6 +13,13 @@ to `~/.pi/agent/profiles/`, then edit the rules to match your own setup.
 They assume the bundle is installed with `pi install git:...`. If you keep a
 checkout instead, set `HERDR_PAIR` to its path.
 
+Run one with the repo's `bin/pi-profile` script (symlink it into `~/.local/bin`):
+
+```bash
+pi-profile worker
+pi-profile reviewer
+```
+
 Panes must be labelled so the watchdog can pair them:
 
 ```bash

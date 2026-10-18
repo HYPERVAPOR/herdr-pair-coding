@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Run pi with a profile from ~/.pi/agent/profiles/<name>.conf.
+# The conf sets a bash array: PROFILE=( -e ... --tools ... ).
+set -euo pipefail
+
+name=${1:-}
+[ -n "$name" ] || { echo "usage: pi-profile <profile> [pi args...]" >&2; exit 2; }
+shift
+f="$HOME/.pi/agent/profiles/$name.conf"
+[ -r "$f" ] || {
+  echo "pi-profile: no such profile: $f" >&2
+  echo "available: $(ls "$HOME/.pi/agent/profiles" 2>/dev/null | sed -n 's/\.conf$//p' | tr '\n' ' ')" >&2
+  exit 1
+}
+command -v pi >/dev/null || { echo "pi-profile: pi is not on PATH" >&2; exit 1; }
+
+PROFILE=()
+# shellcheck source=/dev/null
+. "$f"
+exec pi -ne -ns -np --no-mcp "${PROFILE[@]}" "$@"
