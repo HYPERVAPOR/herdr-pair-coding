@@ -24,9 +24,7 @@ verification, troubleshooting.
 | [`herdr-last-answer`](herdr-last-answer/README.md) | reviewer reads the worker's answer text, no TUI footer, no width truncation |
 | [`refs-reclaim`](refs-reclaim/README.md) | archives and removes worktrees/branches only after proving them safe |
 
-```text
-worker writes ──▶ reviewer reads ──▶ watchdog nudges ──▶ refs-reclaim cleans up
-```
+![Three worker–reviewer pairs, each with its own worktree, watched by one watchdog](docs/pair-loop.png)
 
 ## Install
 
