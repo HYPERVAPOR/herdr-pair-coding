@@ -35,6 +35,35 @@ which resources load):
 }
 ```
 
+### Does installing this bloat the context?
+
+No. `pi install git:...` clones the repository (about 350 KB on disk), but
+loading is decided separately:
+
+- Command-only extensions (`keepctx`, `tools`, `copy-code`) register **no
+  tools**, so they add **0 tokens** to every request.
+- Tool extensions (`deepseek-search`, `last-answer`, `hb_block`,
+  `refs_reclaim`) add a tool schema, and only when they are loaded.
+- Anything you do not list under `extensions` is never loaded: no tool, no
+  command, no context cost.
+
+To load only one, list only that file:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/HYPERVAPOR/pi-dev-bundle",
+      "extensions": ["extensions/copy-code.ts"]
+    }
+  ]
+}
+```
+
+The unused files are still on disk because pi installs a git package as one
+repository. If you also want them off disk, the bundle would need to be split
+into one package per extension; that is not the case today.
+
 ## What's inside
 
 | Extension | Surface | Context cost | Requires |
