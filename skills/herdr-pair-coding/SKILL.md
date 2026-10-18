@@ -25,6 +25,7 @@ git --version        # only for refs-reclaim
 
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh
+export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"   # Debian does not add these
 herdr integration install pi     # or claude, codex, ... ; `herdr integration` lists them
 ```
 
@@ -40,6 +41,8 @@ herdr, `HERDR_ENV` is not `1` and the tools have nothing to talk to.
 With pi:
 
 ```bash
+curl -fsSL https://pi.dev/install.sh | sh   # skip if pi is already installed
+export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"
 pi install git:github.com/HYPERVAPOR/herdr-pair-coding
 P="$HOME/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding"
 ```
@@ -58,6 +61,13 @@ mkdir -p ~/.local/bin
 ln -sfn "$P/herdr-watchdog/herdr-watchdog"       ~/.local/bin/herdr-watchdog
 ln -sfn "$P/herdr-last-answer/herdr-last-answer" ~/.local/bin/herdr-last-answer
 ln -sfn "$P/refs-reclaim/refs-reclaim"           ~/.local/bin/refs-reclaim
+
+# Debian does not put ~/.local/bin on PATH. Make it stick for later shells.
+printf '%s\n' 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"' >> ~/.bashrc
+
+for c in herdr-watchdog herdr-last-answer refs-reclaim; do
+  command -v "$c" || echo "MISSING: $c"
+done
 ```
 
 At this point the workflow already works without pi: label the panes, start the
