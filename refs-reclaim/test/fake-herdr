@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""Fake herdr for the refs-reclaim self-test: implements only `pane list`; pane cwd is
+controlled by FAKE_HERDR_CWD.
+
+FAKE_HERDR_CWD=/a:/b   -> two panes, foreground_cwd = /a and /b (used to test W4 "in use")
+unset                  -> zero panes (nothing is pinned to any worktree)
+"""
+import json
+import os
+import sys
+
+paths = [p for p in os.environ.get("FAKE_HERDR_CWD", "").split(":") if p]
+panes = [
+    {"pane_id": "fake:p%d" % i, "tab_id": "fake:t1", "workspace_id": "fake",
+     "label": "fake", "cwd": p, "foreground_cwd": p, "agent_status": "idle"}
+    for i, p in enumerate(paths)
+]
+if len(sys.argv) >= 2 and sys.argv[1] == "pane" and (len(sys.argv) < 3 or sys.argv[2] == "list"):
+    print(json.dumps({"id": "cli:pane:list", "result": {"panes": panes}}))
+    sys.exit(0)
+print(json.dumps({"id": "cli:unknown", "result": {}}))

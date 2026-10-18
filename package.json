@@ -1,0 +1,33 @@
+{
+  "name": "pi-dev-bundle",
+  "version": "0.1.0",
+  "description": "A bundle of pi extensions for a smoother terminal coding-agent workflow.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coding-agent",
+    "extensions"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HYPERVAPOR/pi-dev-bundle.git"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/keepctx.ts",
+      "./extensions/tools.ts",
+      "./extensions/copy-code.ts",
+      "./extensions/deepseek-search.ts",
+      "./last-answer/last_answer.ts",
+      "./herdr-watchdog/hb_block.ts",
+      "./refs-reclaim/reclaim.ts"
+    ]
+  }
+}

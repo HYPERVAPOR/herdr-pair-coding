@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""last-answer - read only the answer body from another pane: no pi TUI footer,
+no pane-width truncation.
+
+Usage:
+    last-answer <pane|name> [--n N] [--tools]
+
+- Source: `herdr agent get <target>` -> `agent_session.value` (must be
+  kind=path) -> parse the session jsonl and print the last N **assistant
+  text** blocks (default `--n 1`; if `--n` exceeds what is available, print
+  what exists instead of failing). Only text blocks count; thinking, toolCall
+  and toolResult never enter the body.
+- `--tools`: print **one extra line** after the body - a summary of the tools
+  called in the last answer's turn (tool name + first 60 chars of the first
+  argument, max 10). **Never print the full toolResult.**
+- Missing path / kind is not path / file does not exist yet / no assistant text
+  in the file -> clear error on stderr + non-zero exit, with the fallback:
+  `herdr agent read <target> --source recent-unwrapped`.
+
+Diagnostics such as "what is on screen / is it stuck / are there errors" still
+belong to `herdr agent read`, not this command.
+
+env: `HERDR_BIN` overrides the herdr executable (for tests; default `herdr`).
+"""
+import argparse
+import collections
+import errno
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime
+
+N_MAX_TOOLS = 10
+ARG_CHARS = 60
+# Exit codes: 2 = cannot fetch/parse, 3 = fetched but there is no answer yet
+# (lets the script tell "has not spoken" from "fetch failed").
+# "Session file does not exist yet" means the other side has not spoken (new
+# session / just restarted), so it is also 3 (see the errno.ENOENT branch in main).
+EXIT_FETCH = 2
+EXIT_NO_ANSWER = 3
+
+
+def die(msg, target, code=EXIT_FETCH):
+    print("last-answer: %s" % msg, file=sys.stderr)
+    print("  fallback: herdr agent read %s --source recent-unwrapped (screen / stuck / errors)" % target,
+          file=sys.stderr)
+    sys.exit(code)
+
+
+def fetch_session_path(target):
+    """`herdr agent get <target>` -> agent_session.value (must be kind=path)."""
+    herdr = os.environ.get("HERDR_BIN") or "herdr"
+    try:
+        p = subprocess.run([herdr, "agent", "get", target], capture_output=True, text=True, timeout=60)
+    except OSError as e:
+        die("cannot run `%s agent get %s`: %s" % (herdr, target, e), target)
+    if p.returncode != 0:
+        tail = (p.stderr or p.stdout or "").strip().splitlines()[-3:]
+        die("`%s agent get %s` exited %d: %s" % (herdr, target, p.returncode, " / ".join(tail)), target)
+    try:
+        sess = json.loads(p.stdout)["result"]["agent"]["agent_session"]
+    except (ValueError, KeyError, TypeError) as e:
+        die("cannot parse agent_session from `%s agent get %s`: %s" % (herdr, target, e), target)
+    kind, value = sess.get("kind"), (sess.get("value") or "")
+    if not value:
+        die("%s has no agent_session.value (there may be no agent in this pane)" % target, target)
+    if kind != "path":
+        die("%s has agent_session.kind=%r, not path; cannot locate the session file" % (target, kind), target)
+    return value
+
+
+def _tool_arg(call):
+    """Flatten the first argument to one line and truncate to 60 chars."""
+    args = call.get("arguments")
+    first = ""
+    if isinstance(args, dict) and args:
+        first = next(iter(args.values()))
+    elif args:
+        first = args
+    if not isinstance(first, str):
+        first = json.dumps(first, ensure_ascii=False)
+    first = " ".join(first.split())
+    return first if len(first) <= ARG_CHARS else first[:ARG_CHARS] + "…"
+
+
+def read_answers(path, want):
+    """Scan the session jsonl and return the last `want` assistant texts.
+    Each answer's `tools` = tools called since the previous answer."""
+    answers = collections.deque(maxlen=max(want, 1))
+    pending = []          # tools called after the previous answer, before this one = "this turn"
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError as e:
+        return None, e
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue                      # partial line / non-session line: skip
+            if rec.get("type") != "message":
+                continue
+            msg = rec.get("message") or {}
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            texts = []
+            for blk in content:
+                if not isinstance(blk, dict):
+                    continue
+                if blk.get("type") == "text" and (blk.get("text") or "").strip():
+                    texts.append(blk["text"])
+                elif blk.get("type") == "toolCall":
+                    pending.append((blk.get("name") or "?", _tool_arg(blk)))
+            if texts:
+                answers.append({"text": "\n".join(t.rstrip() for t in texts),
+                                "ts": rec.get("timestamp") or msg.get("timestamp") or "",
+                                "tools": pending})
+                pending = []
+    return answers, None
+
+
+def fmt_ts(ts):
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
+    except (ValueError, AttributeError):
+        return ""
+
+
+def render(answers, show_tools):
+    out = []
+    if len(answers) > 1:
+        for i, a in enumerate(answers, 1):
+            if i > 1:
+                out.append("")
+            out.append("[%d/%d] %s" % (i, len(answers), fmt_ts(a["ts"])))
+            out.append(a["text"])
+    elif answers:
+        out.append(answers[0]["text"])
+    if show_tools:
+        tools = answers[-1]["tools"] if answers else []
+        head = tools[:N_MAX_TOOLS]
+        items = ["%s: %s" % (n, a) for n, a in head]
+        if len(tools) > len(head):
+            items.append("… (%d more)" % (len(tools) - len(head)))
+        out.append("[tools] " + (" · ".join(items) if items else "(no tool calls in this turn)"))
+    return "\n".join(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="last-answer", add_help=True,
+                                 description="Read only the answer body from another pane (no TUI footer, no width truncation)")
+    ap.add_argument("target", nargs="?", help="pane id or agent name")
+    ap.add_argument("--n", type=int, default=1, help="print the last N answers (default 1)")
+    ap.add_argument("--tools", action="store_true", help="also print a summary of tools called in the last answer's turn")
+    args = ap.parse_args()
+
+    if not args.target:
+        ap.error("a pane id or agent name is required")
+    if args.n < 1:
+        ap.error("--n must be >= 1")
+
+    path = fetch_session_path(args.target)
+    answers, err = read_answers(path, args.n)
+    if err is not None:
+        if getattr(err, "errno", None) == errno.ENOENT:
+            # File not persisted yet = that pane has not spoken, same as "no
+            # assistant text in the file". Both are exit 3 so the tool shell can
+            # say "it has not spoken, wait for delivery" instead of handing a raw
+            # errno to the model (pi would render that as a failure).
+            die("session file not persisted yet: %s has not spoken (new session / just restarted); pi creates it after the first message (%s)"
+                % (args.target, path), args.target, EXIT_NO_ANSWER)
+        die("cannot read session file %s: %s" % (path, err), args.target)
+    if not answers:
+        die("session file %s has no assistant text (has it answered yet?)" % path, args.target, EXIT_NO_ANSWER)
+
+    print(render(list(answers), args.tools))
+
+
+if __name__ == "__main__":
+    main()

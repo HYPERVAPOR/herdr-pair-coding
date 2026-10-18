@@ -1,0 +1,868 @@
+#!/usr/bin/env python3
+"""herdr-watchdog - watchdog v3: read/write the heartbeat-block flag, judge
+pairs, and run as a daemon (README sections 1/2/5).
+
+Flag file: $HB_DIR/<session>__<tab>.json (default ~/.herdr/watchdog/).
+Only the reviewer writes it (through the hb_block tool in its profile ->
+this script's `set`); the judge only reads it.
+
+Subcommands:
+  herdr-watchdog set --action block|unblock --reason "long task"  # write the flag (called by hb_block)
+  herdr-watchdog show [--session S --tab T]                      # for humans: current value + recent changes
+  herdr-watchdog get  [--session S --tab T]                      # print true/false (reviewer footer reads it)
+  herdr-watchdog top  [--refresh 1]                              # read-only view: heartbeat / who was called
+  herdr-watchdog run [--dry-run] [--all-sessions] [--tab T]       # judge one pass (--dry-run prints only)
+  herdr-watchdog daemon [--interval 20]                           # daemon: scan all running herdr sessions
+
+Daemon (systemd): scans all sessions every interval seconds; pauses while
+$HB_DIR/PAUSE exists; logs to $HB_DIR/watchdog.log (2 MB x 3 rotation); only
+one instance at a time ($HB_DIR/.lock).
+env: HERDR_SESSION / HERDR_TAB_ID / HERDR_PANE_ID pick the file; HB_DIR
+overrides the directory (tests).
+"""
+import argparse
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import time
+
+HB_DIR = os.environ.get("HB_DIR") or os.path.expanduser("~/.herdr/watchdog")
+REASON_MAX = 120         # longer reasons are truncated with "…", not rejected (rejecting would leave the pair unmuted)
+                         # the loose schema gate lives in hb_block.ts (maxLength: 200, must be >= this)
+HISTORY_MAX = 20         # README §2: keep the last ~20 history entries
+STALE_SEC = 600          # README §1: no growth in the session file for 10 minutes = no output
+INTERVAL = 20            # README §1: one pass every 20s (one pass takes ~0.07s, <0.4% duty cycle)
+RUN_INTERVAL = INTERVAL  # actual daemon interval (daemon --interval changes it); written to the snapshot for top
+LOG = os.path.join(HB_DIR, "watchdog.log")
+PAUSE = os.path.join(HB_DIR, "PAUSE")
+LOCK = os.path.join(HB_DIR, ".lock")
+LOG_MAX = int(os.environ.get("HB_LOG_MAX") or 2_000_000)   # simple rotation: .1 .2 .3
+LOG_KEEP = 3
+SETTLE_WAIT = 5.0        # after an interrupt, wait up to this long for idle before sending
+DRY = False
+
+TEXT_HEAD = "[heartbeat] "
+
+# README §1.4: A has two versions (reviewer stuck / worker stuck); B is neither side working.
+# Messages carry no timing numbers (the number does not change the action but invites precision
+# questions). The threshold is still 10 minutes, and logs/--dry-run still show the age for humans.
+# Only A2 interpolates the worker pane names (possibly several).
+TEXT_A1 = (TEXT_HEAD + "Your command produced no output, so I interrupted it "
+           "(you may see \"Command aborted\").\n"
+           '- Keep going. If a long task was interrupted by mistake, call '
+           'hb_block(action=block, reason="long task") and unblock when done.')
+TEXT_A2 = (TEXT_HEAD + "worker {who} has produced no output (state is still working).\n"
+           '- Long task (e2e etc.)? Block on behalf of the pair: '
+           'hb_block(action=block, reason="…"), then unblock when done.\n'
+           '- Really stuck? Go to that pane and handle it (send-keys esc / re-dispatch).')
+TEXT_B = (TEXT_HEAD + "Neither you nor the worker is working.\n"
+          '- Finished this round? hb_block(action=block, reason="done")\n'
+          '- Waiting for a human decision? Also block (say what you wait for), report to master\n'
+          '- Still have work? Do it; read the worker with last-answer\n'
+          "  I will ask again unless you block.")
+LABELS = {"reviewer-stuck": "A1", "worker-stuck": "A2", "quiet": "B"}
+
+_WARNED = set()
+
+
+def log(msg):
+    """One timestamped line. In dry-run it only goes to the screen; as a daemon it also goes to $HB_DIR/watchdog.log."""
+    line = "%s %s" % (time.strftime("%F %T"), msg)
+    print(line, flush=True)
+    if DRY:
+        return
+    try:
+        os.makedirs(HB_DIR, exist_ok=True)
+        if os.path.exists(LOG) and os.path.getsize(LOG) > LOG_MAX:
+            for i in range(LOG_KEEP - 1, 0, -1):
+                if os.path.exists("%s.%d" % (LOG, i)):
+                    os.replace("%s.%d" % (LOG, i), "%s.%d" % (LOG, i + 1))
+            os.replace(LOG, LOG + ".1")
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def warn(msg):
+    """Emit each message once per process (README §1.1), so it does not flood the output."""
+    if msg in _WARNED:
+        return
+    _WARNED.add(msg)
+    log("WARN  " + msg)
+
+
+def now_iso():
+    return time.strftime("%FT%T")
+
+
+def fmt_age(sec):
+    if sec is None:
+        return "?"
+    if sec < 90:
+        return "%.0fs" % sec
+    if sec < 5400:
+        return "%.0fm" % (sec / 60.0)
+    return "%.1fh" % (sec / 3600.0)
+
+
+# ------------------------------------------------------------------ flag file
+
+def flag_path(session, tab):
+    # README §2: <session>__<tab>.json (colons in tab are kept)
+    return os.path.join(HB_DIR, "%s__%s.json" % (session, tab))
+
+
+def read_flag(session, tab):
+    """-> dict / None (missing file, or unreadable: treat unreadable as false, never crash)"""
+    try:
+        with open(flag_path(session, tab)) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        warn("%s is unreadable (%r) -> treating as false" % (flag_path(session, tab), e))
+        return None
+
+
+def write_json(path, d):
+    """Atomic write (tmp + os.replace) - used for flags and the last-pass snapshot."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def read_json(path):
+    """-> dict / None (unreadable means missing; the reader never crashes on a bad file)"""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def write_flag(session, tab, d):
+    write_json(flag_path(session, tab), d)
+
+
+def where(args):
+    """-> (session, tab, err)"""
+    session = args.session or os.environ.get("HERDR_SESSION")
+    tab = args.tab or os.environ.get("HERDR_TAB_ID")
+    if not session or not tab:
+        return None, None, "cannot locate the file: need HERDR_SESSION / HERDR_TAB_ID (or --session/--tab)"
+    return session, tab, None
+
+
+# ------------------------------------------------------------------ set / show
+
+def cmd_set(args):
+    session, tab, err = where(args)
+    if err:
+        print(err)
+        return 1
+    by = args.by or os.environ.get("HERDR_PANE_ID") or "unknown"
+    reason = (args.reason or "").strip()
+    if not reason:
+        print("reason must not be empty: write one short sentence (<=%d chars)" % REASON_MAX)
+        return 2
+    cut = len(reason) > REASON_MAX          # truncate, never reject (README §2)
+    if cut:
+        reason = reason[:REASON_MAX] + "…"
+    note = "\nreason was truncated (keep it short)" if cut else ""
+
+    want = args.action == "block"
+    f = read_flag(session, tab)
+    cur = bool(f.get("current")) if f else False
+    if want == cur:
+        # README §2: no change -> write nothing
+        if f:
+            print("already %s (since %s, reason: %s); no change recorded%s"
+                  % (str(cur).lower(), f.get("current_since", "?"), f.get("current_reason", ""), note))
+        else:
+            print("already false (nothing recorded); no change recorded%s" % note)
+        return 0
+
+    at = now_iso()
+    hist = list(f.get("history") or []) if f else []
+    hist.append({"at": at, "from": cur, "to": want, "reason": reason, "by": by})
+    write_flag(session, tab, {
+        "session": session,
+        "tab": tab,
+        "reviewer_pane": by,
+        "current": want,
+        "current_since": at,
+        "current_reason": reason,
+        "history": hist[-HISTORY_MAX:],
+    })
+    print("heartbeat %s (%s, since %s, reason: %s)%s"
+          % ("blocked" if want else "restored", str(want).lower(), at, reason, note))
+    return 0
+
+
+def cmd_show(args):
+    if args.session or args.tab:
+        session, tab, err = where(args)
+        if err:
+            print(err)
+            return 1
+        files = [flag_path(session, tab)]
+    elif os.environ.get("HERDR_SESSION") and os.environ.get("HERDR_TAB_ID"):
+        files = [flag_path(os.environ["HERDR_SESSION"], os.environ["HERDR_TAB_ID"])]
+    else:
+        try:
+            files = [os.path.join(HB_DIR, f) for f in sorted(os.listdir(HB_DIR)) if f.endswith(".json")]
+        except FileNotFoundError:
+            files = []
+    if not files:
+        print("(no flag files in %s)" % HB_DIR)
+        return 0
+    for p in files:
+        show_file(p)
+    return 0
+
+
+def cmd_get(args):
+    """Print one line, true or false - hb_block.ts reads it to refresh the footer indicator (README §2)"""
+    session, tab, err = where(args)
+    if err:
+        print(err)
+        return 1
+    f = read_flag(session, tab)
+    print("true" if f and f.get("current") is True else "false")
+    return 0
+
+
+def show_file(p):
+    try:
+        with open(p) as f:
+            d = json.load(f)
+    except FileNotFoundError:
+        print("%s\n  (no such flag file; treating as false)" % p)
+        return
+    except Exception as e:
+        print("%s\n  unreadable: %r" % (p, e))
+        return
+    print("%s  (session %s / tab %s, reviewer %s)"
+          % (os.path.basename(p), d.get("session"), d.get("tab"), d.get("reviewer_pane")))
+    print("  current: %s   since %s   reason: %s"
+          % (str(bool(d.get("current"))).lower(), d.get("current_since"), d.get("current_reason")))
+    hist = d.get("history") or []
+    print("  history (%d total, last %d):" % (len(hist), min(len(hist), 5)))
+    for h in hist[-5:][::-1]:
+        print("    %s  %-5s -> %-5s  %s   by %s"
+              % (h.get("at"), str(h.get("from")).lower(), str(h.get("to")).lower(),
+                 h.get("reason"), h.get("by")))
+
+
+# ------------------------------------------------------------------ judge (run)
+
+def herdr(bin_path, *args):
+    """-> result dict / None (any failure is None; the caller treats it as "do nothing this round")"""
+    try:
+        p = subprocess.run([bin_path] + list(args), capture_output=True, text=True, timeout=25)
+    except Exception as e:
+        warn("cannot run %s %s (%r)" % (bin_path, " ".join(args), e))
+        return None
+    if p.returncode != 0:
+        warn("%s %s failed (exit %d: %s)"
+             % (bin_path, " ".join(args), p.returncode, (p.stderr or "").strip()[:200]))
+        return None
+    try:
+        return json.loads(p.stdout).get("result")
+    except Exception as e:
+        warn("%s %s output is not JSON (%r)" % (bin_path, " ".join(args), e))
+        return None
+
+
+def clean_label(pane_info):
+    return (pane_info.get("label") or "").strip().lower()
+
+
+def find_pairs(agents, panes_by_ws):
+    """README §1.1: pane labels must contain both worker and reviewer.
+    -> (pairs, unknown); unknown = (tab, why), warned once."""
+    groups = {}
+    for a in agents:
+        if a.get("workspace_id") and a.get("tab_id"):
+            groups.setdefault((a["workspace_id"], a["tab_id"]), []).append(a)
+    pairs, unknown = [], []
+    for (ws, tab), ags in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        if len(ags) < 2:                      # a tab with a single agent is not a pair
+            continue
+        labels = {a.get("pane_id"): clean_label(panes_by_ws.get(ws, {}).get(a.get("pane_id"), {}))
+                  for a in ags}
+        rev = [a for a in ags if "reviewer" in labels[a.get("pane_id")]]
+        wrk = [a for a in ags if "worker" in labels[a.get("pane_id")]]
+        if len(rev) == 1 and wrk:
+            pairs.append({"ws": ws, "tab": tab, "reviewer": rev[0], "workers": wrk, "labels": labels})
+        else:
+            unknown.append((tab, "labels=%s"
+                            % ",".join("%s:%s" % (a.get("pane_id"), labels[a.get("pane_id")] or "-")
+                                       for a in ags)))
+    return pairs, unknown
+
+
+def pane_facts(pane, now):
+    """-> (mtime_age, note). A non-empty note means this pane cannot be judged; skip it (not stuck)."""
+    ses = pane.get("agent_session") or {}
+    path = ses.get("value") if ses.get("kind") == "path" else None
+    if not path:
+        return None, "%s has no session file path (agent_session.kind=%s) -> skipping this pane" % (
+            pane.get("pane_id"), ses.get("kind"))
+    try:
+        return now - os.stat(path).st_mtime, None
+    except Exception as e:
+        return None, "%s session file %s could not be stat'ed (%r) -> skipping this pane" % (pane.get("pane_id"), path, e)
+
+
+def judge(pair, now):
+    """Pure judgement plus the structured flags used by the view/snapshot."""
+    plan = _judge(pair, now)
+    f = read_flag(pair["session"], pair["tab"])
+    plan.update({"flag": bool(f.get("current")) if f else False,
+                 "flag_since": (f or {}).get("current_since"),
+                 "flag_reason": (f or {}).get("current_reason")})
+    return plan
+
+
+def _judge(pair, now):
+    """Pure judgement; returns a plan: action None / prompt(A|B) / interrupt, plus display lines."""
+    session, tab = pair["session"], pair["tab"]
+    ref = pair["reviewer"]
+    panes = [ref] + pair["workers"]
+    lines = []
+
+    f = read_flag(session, tab)
+    if f is None:
+        lines.append("flag: no file (treating as false)")
+    else:
+        lines.append("flag: current=%s (since %s, reason: %s)"
+                     % (str(bool(f.get("current"))).lower(),
+                        f.get("current_since", "?"), f.get("current_reason", "")))
+    if f and f.get("current") is True:
+        lines.append("judge: flag=true -> do not disturb (return)")
+        return {"action": None, "lines": lines, "panes": []}
+
+    facts = {}
+    panes_view = []
+    for p in panes:
+        age, note = pane_facts(p, now)
+        facts[p.get("pane_id")] = (age, note)
+        role = "reviewer" if p is ref else "worker"
+        panes_view.append({"id": p.get("pane_id"), "role": role,
+                           "status": p.get("agent_status"), "age": age, "note": note})
+        if note:
+            lines.append("  %s %s: %s  %s" % (p.get("pane_id"), role, p.get("agent_status", "?"), note))
+            warn(note)
+        else:
+            lines.append("  %s %s: %s, session file changed %s ago"
+                         % (p.get("pane_id"), role, p.get("agent_status", "?"), fmt_age(age)))
+
+    def age_of(p):
+        return facts[p.get("pane_id")][0]
+
+    working = [p for p in panes if p.get("agent_status") == "working"]
+    fresh = [p for p in working if age_of(p) is not None and age_of(p) < STALE_SEC]
+    stuck = [p for p in working if age_of(p) is not None and age_of(p) >= STALE_SEC]
+
+    # shortcut: as long as one pane is fresh, do not disturb the pair (README §1.3, first rule).
+    # Cost: "one worker stuck while the other (or the reviewer) still produces" does not send A.
+    # If this turns out to leave pairs unattended in practice, change it to "any stuck pane
+    # means the pair is stuck".
+    if fresh:
+        lines.append("judge: a working pane produced output %s ago -> it is really working (return)"
+                     % fmt_age(min(age_of(p) for p in fresh)))
+        if stuck:
+            lines.append("  note: another pane (%s) has been stuck for %s - returning this round per §1.3"
+                         % (",".join(p["pane_id"] for p in stuck),
+                            fmt_age(min(age_of(p) for p in stuck))))
+        return {"action": None, "lines": lines, "panes": panes_view}
+
+    if not working:                            # neither side working -> message B
+        lines.append("judge: no pane is working -> message B")
+        return {"action": "prompt", "target": ref["pane_id"], "text": TEXT_B, "why": "quiet",
+                "lines": lines, "panes": panes_view}
+
+    if any(p is ref for p in stuck):           # reviewer itself stuck -> interrupt + A1
+        lines.append("judge: reviewer is working with no output for %s -> interrupt, then A1"
+                     % fmt_age(age_of(ref)))
+        return {"action": "interrupt", "target": ref["pane_id"], "text": TEXT_A1,
+                "why": "reviewer-stuck", "lines": lines, "panes": panes_view}
+
+    if stuck:                                  # worker stuck, reviewer idle -> A2
+        ids, worst = [p["pane_id"] for p in stuck], min(age_of(p) for p in stuck)
+        lines.append("judge: worker %s stuck (%s with no output), reviewer not working -> A2"
+                     % (",".join(ids), fmt_age(worst)))
+        return {"action": "prompt", "target": ref["pane_id"],
+                "text": TEXT_A2.format(who=", ".join(ids)), "why": "worker-stuck",
+                "lines": lines, "panes": panes_view}
+
+    lines.append("judge: panes are working but output cannot be judged (missing path / stat failed) -> do nothing")
+    return {"action": None, "lines": lines, "panes": panes_view}
+
+
+def wait_settled(bin_path, target, timeout):
+    """After esc, wait for idle/done (at most timeout seconds). If it does not settle, send anyway."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = herdr(bin_path, "agent", "get", target)
+        st = ((r or {}).get("agent") or {}).get("agent_status")
+        if st in ("idle", "done", None):
+            return st
+        time.sleep(0.3)
+    return None
+
+
+def do_action(bin_path, plan, tag):
+    """Actually send / interrupt. README §1.4: interrupt the stuck reviewer first, then send."""
+    if plan["action"] == "interrupt":
+        if herdr(bin_path, "agent", "send-keys", plan["target"], "esc") is None:
+            log("WARN  interrupt %s failed (%s)" % (plan["target"], tag))
+            return
+        st = wait_settled(bin_path, plan["target"], SETTLE_WAIT)
+        log("ESC   interrupted %s (esc; settled: %s)" % (plan["target"], st or "timeout"))
+        text, label = plan["text"], "message " + LABELS[plan["why"]]
+    elif plan["action"] == "prompt":
+        text, label = plan["text"], "message " + LABELS[plan["why"]]
+    else:
+        return
+    if herdr(bin_path, "agent", "prompt", plan["target"], text) is None:
+        log("WARN  send to %s failed (%s %s) -> retried next round" % (plan["target"], tag, label))
+    else:
+        log("SEND  %s -> %s (%s)" % (label, plan["target"], tag))
+
+
+def scan_session(session, bin_path, only_tab, now):
+    """One pass for one session: find pairs -> judge -> print (dry-run) / act."""
+    r = herdr(bin_path, "agent", "list")
+    if r is None:
+        warn("%s: agent list failed -> skipping this session this round" % session)
+        return None
+    agents = r.get("agents") or []
+    panes_by_ws = {}
+    for ws in sorted({a.get("workspace_id") for a in agents if a.get("workspace_id")}):
+        rp = herdr(bin_path, "pane", "list", "--workspace", ws) or {}
+        panes_by_ws[ws] = {p.get("pane_id"): p for p in (rp.get("panes") or [])}
+
+    pairs, unknown = find_pairs(agents, panes_by_ws)
+    # Human-readable names: tab_id -> label (herdr tab title, e.g. in-progress / master); fall back to id.
+    tab_names = {t.get("tab_id"): t.get("label")
+                 for t in ((herdr(bin_path, "tab", "list") or {}).get("tabs") or [])}
+    for tab, why in unknown:
+        warn("%s/%s cannot identify a pair (%s) -> no heartbeat" % (session, tab, why))
+    if only_tab:
+        pairs = [pr for pr in pairs if pr["tab"] == only_tab]
+    if not pairs:
+        print("session %s: no identifiable pairs%s"
+              % (session, " (--tab %s)" % only_tab if only_tab else ""))
+
+    seen = []
+    for pr in pairs:
+        pr["session"] = session
+        plan = judge(pr, now)
+        head = "%s/%s" % (session, pr["tab"])
+        seen.append({"session": session, "tab": pr["tab"], "tab_name": tab_names.get(pr["tab"]) or pr["tab"],
+                     "reviewer": pr["reviewer"].get("pane_id"),
+                     "workers": [p.get("pane_id") for p in pr["workers"]],
+                     "panes": plan.get("panes") or [],
+                     "flag": plan.get("flag"), "flag_since": plan.get("flag_since"),
+                     "flag_reason": plan.get("flag_reason"),
+                     "action": plan.get("action"), "target": plan.get("target"),
+                     "why": plan.get("why"), "lines": plan["lines"]})
+        print("\n=== %s  reviewer=%s workers=%s"
+              % (head, pr["reviewer"].get("pane_id"),
+                 ",".join(p.get("pane_id") for p in pr["workers"]) or "-"))
+        for l in plan["lines"]:
+            print("  " + l)
+        if plan["action"] == "interrupt":
+            print("  action: send-keys %s esc, then message %s" % (plan["target"], LABELS[plan["why"]]))
+            print("  --- message %s ---" % LABELS[plan["why"]])
+            print(plan["text"])
+        elif plan["action"] == "prompt":
+            print("  action: send message %s -> %s" % (LABELS[plan["why"]], plan["target"]))
+            print("  --- message %s ---" % LABELS[plan["why"]])
+            print(plan["text"])
+        else:
+            print("  action: none (do not disturb)")
+        if not DRY:
+            do_action(bin_path, plan, head)
+    return {"session": session, "pairs": seen}
+
+
+def running_sessions(bin_path):
+    """Session names with status=running from `herdr session list`."""
+    try:
+        p = subprocess.run([bin_path, "session", "list"], capture_output=True, text=True, timeout=20)
+    except Exception as e:
+        warn("cannot run %s session list (%r)" % (bin_path, e))
+        return None
+    if p.returncode != 0:
+        warn("%s session list failed (exit %d: %s)" % (bin_path, p.returncode, (p.stderr or "").strip()[:200]))
+        return None
+    out = []
+    for line in p.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] != "name" and parts[1] == "running":
+            out.append(parts[0])
+    return out
+
+
+def one_pass(bin_path, dry, all_sessions, only_tab=None):
+    global DRY
+    DRY = dry
+    if all_sessions:
+        sessions = running_sessions(bin_path)
+        if sessions is None:
+            return False
+        if not sessions:
+            print("no running herdr sessions")
+            return True
+    else:
+        session = os.environ.get("HERDR_SESSION")
+        if not session:
+            print("no HERDR_SESSION: run inside a herdr pane or use --all-sessions")
+            return False
+        sessions = [session]
+    now = time.time()
+    seen = []
+    for s in sessions:
+        # Switching sessions: HERDR_SOCKET_PATH wins over HERDR_SESSION, so clear it.
+        os.environ.pop("HERDR_SOCKET_PATH", None)
+        os.environ["HERDR_SESSION"] = s
+        got = scan_session(s, bin_path, only_tab, now)
+        if got is None:
+            continue
+        seen.extend(got["pairs"])
+    if not DRY:
+        write_snapshot(sessions, seen, now, time.time() - now)   # mirror for the top view; dry-run does not write
+    if DRY:
+        print("\n[dry-run] no messages sent, no interrupts.")
+    return True
+
+
+def cmd_run(args):
+    return 0 if one_pass(args.herdr_bin, args.dry_run, args.all_sessions, args.tab) else 1
+
+
+def cmd_daemon(args):
+    global DRY, RUN_INTERVAL
+    DRY = False
+    RUN_INTERVAL = args.interval
+    os.makedirs(HB_DIR, exist_ok=True)
+    lockf = open(LOCK, "a")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("WARN  an instance is already running (%s is locked) -> exiting 0" % LOCK)
+        return 0
+    log("start pid=%d interval=%gs scanning all running sessions; pauses while %s exists"
+        % (os.getpid(), args.interval, PAUSE))
+    paused = False
+    while True:
+        try:
+            if os.path.exists(PAUSE):
+                if not paused:
+                    log("PAUSE present -> paused (remove it to resume)")
+                    paused = True
+            else:
+                if paused:
+                    log("PAUSE removed -> resumed")
+                    paused = False
+                one_pass(args.herdr_bin, dry=False, all_sessions=True)
+        except Exception as e:
+            log("ERR  %r" % (e,))
+        time.sleep(args.interval)
+
+
+# ------------------------------------------------------------------ top (read-only view, README §5)
+
+def snapshot_path():
+    return os.path.join(HB_DIR, "last-pass.json")
+
+
+def write_snapshot(sessions, pairs, now, took=0):
+    """Write what this pass saw for the top view.
+    The view never judges on its own - the daemon owns the logic; the view is a mirror (and takes no lock)."""
+    write_json(snapshot_path(), {
+        "at": now_iso(), "ts": now, "took": took, "pid": os.getpid(), "interval": RUN_INTERVAL,
+        "paused": os.path.exists(PAUSE), "sessions": sessions, "pairs": pairs,
+    })
+
+
+def read_snapshot():
+    return read_json(snapshot_path())
+
+
+BUS_X = 1          # column of the trunk (the heartbeat on row 0 also lives here)
+LEAF_X = 8         # every pane name starts at this column (keep branches aligned)
+NAME_MAX = 18      # truncate long tab names so a line does not overflow
+TRUNK_S = 0.5      # time for the signal to travel down the trunk
+BRANCH_S = 0.3     # time to travel along the branch to the pane
+FLASH_S = 1.4      # feedback pulse after the pane receives it
+
+
+def top_put(scr, y, x, text, attr=0):
+    """Draw at (y,x), clipped to width - 2 (never touch the bottom-right cell)"""
+    h, w = scr.getmaxyx()
+    if y < 0 or y >= h or x < 0 or w < 4 or x >= w - 2:
+        return
+    try:
+        scr.addnstr(y, x, str(text).replace("\t", "    "), w - 2 - x, attr)
+    except Exception:
+        pass
+
+
+def top_bar(done, total, width):
+    """Progress bar text (drawn by the view, not by curses lines)"""
+    total = max(total, 1)
+    filled = max(0, min(width, int(round(width * done / float(total)))))
+    return "█" * filled + "░" * (width - filled)
+
+
+def top_pane(pn):
+    """One pane as a short segment: wE:pV reviewer idle 6s (or why it cannot be judged)"""
+    who = "%s %s %s" % (pn.get("id"), pn.get("role"), pn.get("status") or "?")
+    if pn.get("note"):
+        return "%s (%s)" % (who, str(pn["note"]).split("->")[0].strip())
+    return "%s %s" % (who, fmt_age(pn.get("age")))
+
+
+def top_call(pr):
+    """What happened this pass: A2 -> wE:pV / esc+A1 -> wE:pV / skip"""
+    act = {"interrupt": "esc+%s → %s", "prompt": "%s → %s"}.get(pr.get("action"))
+    return act % (LABELS.get(pr.get("why"), "?"), pr.get("target")) if act else "skip"
+
+
+def top_face(pr):
+    """The pair's face: 📣 just called / 😴 blocked / 👂 listening"""
+    return "📣" if pr.get("action") else ("😴" if pr.get("flag") else "👂")
+
+
+def top_hb(pr):
+    """The hb column: hb:true 13:01 (hour:minute only) / hb:false"""
+    on = bool(pr.get("flag"))
+    since = str(pr.get("flag_since") or "")[11:16]
+    return "hb:%s%s" % ("true" if on else "false", " " + since if on and since else "")
+
+
+def top_cols(pairs):
+    """Column widths: name / (tab) / hb - measure then ljust (README §5)"""
+    w_name = max([min(len(str(pr.get("tab_name") or "?")), NAME_MAX) for pr in pairs] or [1])
+    w_tab = max([len(str(pr.get("tab"))) + 2 for pr in pairs] or [1])
+    w_hb = max([len(top_hb(pr)) for pr in pairs] or [1])
+    return w_name, w_tab, w_hb
+
+
+def top_leaf(pr, cols, sessions):
+    """The leaf row: face + tab name + (tab) + hb value + what happened, aligned in four columns"""
+    w_name, w_tab, w_hb = cols
+    name = str(pr.get("tab_name") or "?")
+    if len(name) > NAME_MAX:
+        name = name[:NAME_MAX - 1] + "…"
+    sess = "%s/" % pr.get("session") if len(sessions or []) > 1 else ""
+    return "%s %s %s %s %s" % (top_face(pr), name.ljust(w_name),
+                               ("(%s%s)" % (sess, pr.get("tab"))).ljust(w_tab),
+                               top_hb(pr).ljust(w_hb), top_call(pr))
+
+
+def top_draw(scr, attrs=None):
+    """One screen: the heartbeat (dog) at the top of the trunk, a branch per pair to its panes;
+    the signal travels down the trunk and along the branch to the pane that was called.
+    Reads the snapshot only; never acts. -> (animating, seconds until next pass)"""
+    attrs = attrs or {}
+    h, w = scr.getmaxyx()
+    scr.erase()
+    snap = read_snapshot()
+    now = time.time()
+    dim = attrs.get("dim", 0)
+    sig = attrs.get("signal", attrs.get("call", 0))
+
+    pid = (snap or {}).get("pid")
+    if not snap:
+        who = "no snapshot yet"
+    elif pid and os.path.exists("/proc/%d" % pid):
+        who = "pid %d" % pid
+    else:
+        who = "daemon gone (pid %s died)" % pid
+    every = (snap or {}).get("interval") or INTERVAL
+    pulse = "♥" if int(now) % 2 == 0 else "♡"      # beats once per second
+    top_put(scr, 0, BUS_X, pulse, attrs.get("beat", 0))
+    top_put(scr, 0, 3, "watchdog v3 · %s · %gs/pass · q quit" % (who, every), attrs.get("head", 0))
+
+    pairs = sorted((snap or {}).get("pairs") or [], key=lambda pr: 0 if pr.get("action") else 1)
+    called = [i for i, pr in enumerate(pairs) if pr.get("action")]
+    sessions = (snap or {}).get("sessions") or []
+    left, age = None, 1e9
+    if snap:
+        ts, took = snap.get("ts") or 0, snap.get("took") or 0
+        elapsed, total = now - ts, took + every
+        left = total - elapsed
+        # The signal starts when this pass becomes visible (the snapshot is written after it
+        # finishes, so ts+took is the start point).
+        age = now - (ts + took)
+        bar_w = max(8, min(40, w - 46))
+        tag = " · %d called" % len(called) if called else ""
+        if left > 0.5:
+            beat = "%ds %s next in %ds%s" % (int(elapsed), top_bar(elapsed, total, bar_w), int(left + 0.5), tag)
+        elif left > -(took + 20):
+            beat = "%ds %s running now%s" % (int(elapsed), top_bar(total, total, bar_w), tag)
+        else:
+            beat = "last pass %s ago — daemon gone?" % fmt_age(elapsed)
+        top_put(scr, 1, BUS_X, "┃", dim)
+        top_put(scr, 1, 3, beat, attrs.get("beat", dim))
+    else:
+        top_put(scr, 1, 3, "no snapshot: %s (daemon has not finished a pass yet)" % snapshot_path(), dim)
+
+    n = max(1, len(pairs))
+    cols = top_cols(pairs)
+    animating = bool(called) and 0 <= age <= TRUNK_S + BRANCH_S + FLASH_S
+    y = 2
+    pair_rows = {}
+    for i, pr in enumerate(pairs):
+        if y > h - 2:
+            top_put(scr, h - 1, BUS_X, "┗━ …(%d more)" % (len(pairs) - i), dim)
+            break
+        on = bool(pr.get("flag"))
+        top_put(scr, y, BUS_X, "┗" if i == len(pairs) - 1 else "┣", dim)
+        top_put(scr, y, 2, "━" * (LEAF_X - 3), dim)
+        top_put(scr, y, LEAF_X, top_leaf(pr, cols, sessions),
+                attrs.get("call" if pr.get("action") else ("flag_on" if on else "flag_off"), 0))
+        pair_rows[i] = y
+        y += 1
+        if pr.get("panes"):
+            top_put(scr, y, BUS_X, "┃", dim)
+            top_put(scr, y, LEAF_X + 2, " | ".join(top_pane(pn) for pn in pr["panes"]), dim)
+            y += 1
+
+    # Signal: light the trunk -> run along the branch (●) -> flash at the pane (✦)
+    if animating:
+        last = max(called)
+        front = age / TRUNK_S * n                    # which branch the signal has reached (1-based, continuous)
+        for i in called:
+            t0 = TRUNK_S * (i + 1) / n
+            pr = pairs[i]                             # do not reuse pr from the previous loop
+            yr = pair_rows.get(i)
+            if age < t0 or yr is None:
+                continue
+            for r in range(1, yr + 1):               # light the trunk down to this row
+                top_put(scr, r, BUS_X,
+                        "┗" if (r == yr and i == len(pairs) - 1) else ("┣" if r == yr else "┃"), sig)
+            bp = min(1.0, (age - t0) / BRANCH_S)
+            nx = 2 + int(bp * (LEAF_X - 3))
+            top_put(scr, yr, 2, "━" * max(0, nx - 2), sig)
+            if bp < 1.0:
+                top_put(scr, yr, nx, "●", sig)      # still running along the branch
+            else:
+                top_put(scr, yr, LEAF_X, top_leaf(pr, cols, sessions), sig)
+                blink = int((age - t0 - BRANCH_S) / 0.22) % 2 == 0
+                top_put(scr, yr, LEAF_X - 2, "✦" if blink else " ", sig)   # received; flash
+        if front < last + 1:                         # not at the bottom yet: a dot on the trunk
+            top_put(scr, min(pair_rows.get(last, h - 1), 1 + int(front)), BUS_X, "◆", sig)
+    return animating, left
+
+
+def cmd_top(args):
+    """Read-only view: attach to see what the daemon is doing. No actions, no messages, no lock."""
+    try:
+        import curses
+    except ImportError:
+        print("curses is not available on this machine; cannot show the full-screen view")
+        return 1
+
+    def loop(scr):
+        try:
+            curses.curs_set(0)
+        except Exception:
+            pass
+        scr.timeout(int(args.refresh * 1000))
+        every_seconds = float(INTERVAL)
+        attrs = {}
+        try:
+            curses.use_default_colors()
+            curses.start_color()
+            curses.init_pair(1, curses.COLOR_YELLOW, -1)   # blocked (true)
+            curses.init_pair(2, curses.COLOR_GREEN, -1)    # not blocked (false)
+            curses.init_pair(3, curses.COLOR_CYAN, -1)     # header
+            curses.init_pair(4, curses.COLOR_RED, -1)      # heartbeat / signal / who was called
+            attrs = {"head": curses.color_pair(3) | curses.A_BOLD, "dim": curses.A_DIM,
+                     "beat": curses.color_pair(4), "call": curses.color_pair(4),
+                     "signal": curses.color_pair(4) | curses.A_BOLD,
+                     "flag_on": curses.color_pair(1), "flag_off": curses.color_pair(2)}
+        except Exception:
+            pass
+        while True:
+            animating, left = top_draw(scr, attrs)
+            every_seconds = (read_snapshot() or {}).get("interval") or INTERVAL
+            scr.refresh()
+            # 1 fps is enough when idle (the second hand moves every second); animate or
+            # about-to-fire -> 10 fps. Lead time is 15% of the interval (3s at 20s), so a
+            # short interval does not run at 10 fps all the time.
+            soon = left is not None and left < min(5.0, every_seconds * 0.15)
+            scr.timeout(100 if (animating or soon) else int(args.refresh * 1000))
+            if scr.getch() in (ord("q"), ord("Q"), 27):
+                return
+
+    curses.wrapper(loop)
+    return 0
+
+
+# ------------------------------------------------------------------ main
+
+def main():
+    argv = sys.argv[1:]
+    # Allow `herdr-watchdog --dry-run` without the `run` subcommand.
+    if not argv or argv[0].startswith("-"):
+        argv = ["run"] + argv
+
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_set = sub.add_parser("set", help="write the flag (called by the reviewer's hb_block tool)")
+    p_set.add_argument("--action", choices=["block", "unblock"], required=True)
+    p_set.add_argument("--reason", required=True, help="one short sentence (<=%d chars)" % REASON_MAX)
+    p_set.add_argument("--session", default=None)
+    p_set.add_argument("--tab", default=None)
+    p_set.add_argument("--by", default=None, help="which pane wrote it (default HERDR_PANE_ID)")
+    p_set.set_defaults(fn=cmd_set)
+
+    p_show = sub.add_parser("show", help="for humans: current value + recent changes")
+    p_show.add_argument("--session", default=None)
+    p_show.add_argument("--tab", default=None)
+    p_show.set_defaults(fn=cmd_show)
+
+    p_get = sub.add_parser("get", help="print true/false (for the footer indicator)")
+    p_get.add_argument("--session", default=None)
+    p_get.add_argument("--tab", default=None)
+    p_get.set_defaults(fn=cmd_get)
+
+    p_top = sub.add_parser("top", help="read-only view: heartbeat / who was called (q quits)")
+    p_top.add_argument("--refresh", type=float, default=1.0,
+                       help="redraw interval when idle (default 1; 10 fps while signalling or about to fire)")
+    p_top.set_defaults(fn=cmd_top)
+
+    p_run = sub.add_parser("run", help="judge one pass (--dry-run prints only)")
+    p_run.add_argument("--dry-run", action="store_true")
+    p_run.add_argument("--all-sessions", action="store_true", help="scan all running herdr sessions")
+    p_run.add_argument("--tab", default=None, help="judge only this tab (debug; default all)")
+    p_run.add_argument("--herdr-bin", default="herdr", help="herdr executable (use a fake in tests)")
+    p_run.set_defaults(fn=cmd_run)
+
+    p_daemon = sub.add_parser("daemon", help="run as a daemon (systemd calls this)")
+    p_daemon.add_argument("--interval", type=float, default=INTERVAL)
+    p_daemon.add_argument("--herdr-bin", default="herdr")
+    p_daemon.set_defaults(fn=cmd_daemon)
+
+    args = ap.parse_args(argv)
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

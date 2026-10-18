@@ -1,0 +1,876 @@
+#!/usr/bin/env python3
+"""refs-reclaim - safely reclaim git worktrees, local branches and remote branches
+(reusable across repos).
+
+Design invariants
+-----------------
+I  : when a ref is deleted, its tip must already be contained in origin/<base>, or
+     must be in an archive approved by `git bundle verify`.
+I' : `git bundle` does not include untracked/ignored files, so before removing a
+     worktree every untracked file outside the whitelist must be copied into the
+     archive directory and hashed with sha256.
+fail-closed: if any check cannot be resolved (fetch/herdr/proc/MR lookup/bundle
+     verify/lease failure), the answer is "do not delete".
+
+Three stages (spec P0-P7)
+-------------------------
+  plan     P0-P2  read-only: fetch + snapshot + classify, writes plan.json / plan.md.
+  archive  P3     lossless: bundle --all + verify + copy non-whitelisted files + manifest(sha256).
+  apply    P4-P6  execute: re-check, then delete; worktree -> local branch -> remote branch.
+
+Usage
+-----
+  refs-reclaim plan    --repo ~/proj/repo
+  refs-reclaim archive --plan .archive/plan-*.json --yes
+  refs-reclaim apply   --plan .archive/plan-*.json \
+                       --archive-manifest .archive/archive-*.json --yes
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+VERSION = "1.0"
+
+DEFAULT_PROTECTED = ["dev", "preprod", "prod", "main"]
+# Reproducible, no loss if deleted, and not a "valuable untracked file"
+DEFAULT_WHITELIST = [
+    ".venv/", "__pycache__/", ".pytest_cache/", "*.egg-info/",
+    "lancedb_data/", ".test-artifacts/", ".ci/", "node_modules/",
+]
+# Directories skipped when computing "recent activity" (reproducible / noise); .test-artifacts is intentionally not skipped
+MTIME_SKIP = {".git", ".venv", "__pycache__", ".pytest_cache", "lancedb_data", "node_modules"}
+
+OK, SKIP = "ok", "skipped"
+
+
+def die(msg: str, code: int = 2):
+    print(f"FATAL: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def run(cmd, cwd=None, check=False):
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if check and p.returncode != 0:
+        die(f"command failed ({p.returncode}): {' '.join(map(str, cmd))}\n{p.stderr.strip()}")
+    return p.returncode, p.stdout.strip(), p.stderr.strip()
+
+
+def git(repo, *args, check=False):
+    return run(["git", "-C", repo, *map(str, args)], check=check)
+
+
+def git_ok(repo, *args):
+    return git(repo, *args)[0] == 0
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def now_stamp():
+    return dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+
+
+# --------------------------------------------------------------------------- #
+# repo facts
+# --------------------------------------------------------------------------- #
+def parse_worktrees(repo):
+    rc, out, err = git(repo, "worktree", "list", "--porcelain")
+    if rc:
+        die(f"git worktree list failed: {err}")
+    items, cur = [], None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            cur = {"path": line[len("worktree "):], "branch": None, "head": None,
+                   "detached": False, "locked": False, "prunable": False, "bare": False}
+            items.append(cur)
+        elif cur is None:
+            continue
+        elif line.startswith("HEAD "):
+            cur["head"] = line[5:].strip()
+        elif line.startswith("branch refs/heads/"):
+            cur["branch"] = line[len("branch refs/heads/"):].strip()
+        elif line.startswith("branch "):
+            cur["branch"] = line[7:].strip()
+        elif line == "detached":
+            cur["detached"] = True
+        elif line == "locked" or line.startswith("locked "):
+            cur["locked"] = True
+        elif line.startswith("prunable"):
+            cur["prunable"] = True
+        elif line == "bare":
+            cur["bare"] = True
+    # the main worktree is the first entry
+    for i, w in enumerate(items):
+        w["is_main"] = (i == 0)
+        w["name"] = os.path.basename(w["path"].rstrip("/"))
+    return items
+
+
+def rev(repo, ref):
+    rc, out, _ = git(repo, "rev-parse", "--verify", "--quiet", ref)
+    return out if rc == 0 and out else None
+
+
+def is_ancestor(repo, ref, of):
+    return git_ok(repo, "merge-base", "--is-ancestor", ref, of)
+
+
+def remote_url(repo, remote="origin"):
+    rc, out, _ = git(repo, "remote", "get-url", remote)
+    return out if rc == 0 else None
+
+
+def gitlab_project(repo, remote="origin"):
+    """git@host:group/proj.git | https://host/group/proj.git -> (host, group/proj)"""
+    url = remote_url(repo, remote)
+    if not url:
+        return None, None
+    m = re.match(r"^(?:ssh://)?(?:[^@/]+@)?(?P<host>[^:/]+)[:/](?P<path>.+?)(?:\.git)?$", url)
+    if not m:
+        return None, None
+    return m.group("host"), m.group("path")
+
+
+def untracked_entries(wt):
+    """Return [(kind, path)]; -uall is too deep, so normal collapses directories."""
+    rc, out, _ = git(wt, "status", "--porcelain", "--untracked-files=normal",
+                     "--ignored=matching")
+    if rc:
+        return None
+    res = []
+    for line in out.splitlines():
+        kind, path = line[:2], line[3:].strip()
+        if kind in ("??", "!!"):
+            res.append((kind, path))
+    return res
+
+
+def grouped_commit_count(repo, ref, remote="origin"):
+    """How many commits on the ref are not on any <remote>/*."""
+    rc, out, _ = git(repo, "rev-list", "--count", ref, "--not", f"--remotes={remote}")
+    return int(out) if rc == 0 and out.isdigit() else None
+
+
+def newest_mtime(path, skip_dirs=MTIME_SKIP):
+    newest, newest_f = 0.0, None
+    for root, dirs, files in os.walk(path, topdown=True):
+        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.endswith(".egg-info")]
+        for f in files:
+            fp = os.path.join(root, f)
+            try:
+                st = os.stat(fp)
+            except OSError:
+                continue
+            if st.st_mtime > newest:
+                newest, newest_f = st.st_mtime, fp
+    return newest, newest_f
+
+
+def matches_whitelist(path, whitelist):
+    """Any path segment matching the whitelist makes it reproducible (e.g. core/__pycache__/, testing/.venv/)."""
+    p = path.rstrip("/")
+    cands = set(p.split("/")) | {p}
+    for w in whitelist:
+        w = w.rstrip("/")
+        for c in cands:
+            if fnmatch.fnmatch(c, w):
+                return True
+    return False
+
+
+def dedupe_paths(paths):
+    """Drop entries covered by a parent entry."""
+    out = []
+    for p in sorted(paths):
+        if any(p == q or p.startswith(q.rstrip("/") + "/") for q in out):
+            continue
+        out.append(p)
+    return out
+
+
+def verify_archived(manifest, src):
+    """Whether src (file or dir) is fully covered by the manifest with matching per-file sha256."""
+    entries = {f["from"]: f["sha256"] for f in manifest.get("files", [])}
+    if os.path.isfile(src):
+        return entries.get(src) == sha256_file(src)
+    if not os.path.isdir(src):
+        return True  # already gone
+    for root, _, files in os.walk(src):
+        if not files and root == src:
+            return True
+        for f in files:
+            fp = os.path.join(root, f)
+            if entries.get(fp) != sha256_file(fp):
+                return False
+    return True
+
+
+def purge_path(p):
+    if os.path.isdir(p) and not os.path.islink(p):
+        shutil.rmtree(p)
+    elif os.path.lexists(p):
+        os.remove(p)
+
+
+# --------------------------------------------------------------------------- #
+# occupancy: herdr panes / /proc cwd / docker
+# --------------------------------------------------------------------------- #
+def pane_cwds(bin_path="herdr"):
+    """-> (status, set(paths)); status=ok means trustworthy. bin_path can be a fake in tests (--herdr-bin)."""
+    if shutil.which(bin_path) is None:
+        return "unavailable(no %s)" % bin_path, set()
+    rc, out, _ = run([bin_path, "pane", "list"])
+    if rc:
+        return "unavailable(herdr rc!=0)", set()
+    try:
+        data = json.loads(out)
+        panes = data["result"]["panes"]
+    except Exception:
+        return "unavailable(herdr parse)", set()
+    paths = set()
+    for p in panes:
+        for k in ("cwd", "foreground_cwd"):
+            v = p.get(k)
+            if v:
+                paths.add(os.path.realpath(v))
+    return "ok", paths
+
+
+def proc_cwds():
+    paths = {}
+    try:
+        pids = [d for d in os.listdir("/proc") if d.isdigit()]
+    except OSError as e:
+        return f"unavailable({e})", paths
+    for pid in pids:
+        try:
+            t = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            continue
+        try:
+            with open(f"/proc/{pid}/comm") as fh:
+                comm = fh.read().strip()
+        except OSError:
+            comm = "?"
+        paths.setdefault(os.path.realpath(t), set()).add(f"{pid}:{comm}")
+    return "ok", paths
+
+
+def docker_mounts():
+    if shutil.which("docker") is None:
+        return "skipped(no docker)", set()
+    rc, out, _ = run(["docker", "ps", "--format", "{{.ID}}"])
+    if rc:
+        return "unavailable(docker ps)", set()
+    paths = set()
+    for cid in out.split():
+        rc2, out2, _ = run(["docker", "inspect", "-f",
+                            "{{range .Mounts}}{{.Source}}\n{{end}}", cid])
+        if rc2 == 0:
+            for line in out2.splitlines():
+                if line.strip():
+                    paths.add(os.path.realpath(line.strip()))
+    return "ok", paths
+
+
+def under(path, root):
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def occupancy_for(wt_path, panes, procs, dockers):
+    """Return the list of "in use" evidence (non-empty means in use)."""
+    hits = []
+    rp = os.path.realpath(wt_path)
+    for p in panes:
+        if under(p, rp):
+            hits.append(f"pane/cwd {p}")
+    for p, who in procs.items():
+        if under(p, rp):
+            hits.append(f"proc/cwd {p} ({','.join(sorted(who))})")
+    for d in dockers:
+        if under(rp, d) or under(d, rp):
+            hits.append(f"docker mount {d}")
+    return hits
+
+
+# --------------------------------------------------------------------------- #
+# MR state (glab)
+# --------------------------------------------------------------------------- #
+def open_mr_sources(repo, remote="origin"):
+    if shutil.which("glab") is None:
+        return "unavailable(no glab)", None
+    host, proj = gitlab_project(repo, remote)
+    if not proj:
+        return "unavailable(no project path)", None
+    env = dict(os.environ, GITLAB_HOST=host)
+    p = subprocess.run(["glab", "api",
+                        f"projects/{proj.replace('/', '%2F')}/merge_requests?state=opened&per_page=100"],
+                       capture_output=True, text=True, env=env)
+    if p.returncode:
+        return f"unavailable(glab rc={p.returncode})", None
+    try:
+        data = json.loads(p.stdout)
+    except Exception:
+        return "unavailable(glab parse)", None
+    src = {}
+    for m in data:
+        src.setdefault(m["source_branch"], []).append(f"!{m['iid']}{'(draft)' if m.get('draft') else ''}")
+    return "ok", src
+
+
+# --------------------------------------------------------------------------- #
+# plan (P0-P2)
+# --------------------------------------------------------------------------- #
+def build_plan(a):
+    repo = os.path.abspath(os.path.expanduser(a.repo))
+    if not os.path.isdir(os.path.join(repo, ".git")) and not os.path.isfile(os.path.join(repo, ".git")):
+        die(f"{repo} is not a git repository/worktree")
+
+    checks = {}
+    # P0 fetch
+    if not a.no_fetch:
+        rc, _, err = git(repo, "fetch", "--prune", a.remote)
+        if rc:
+            die(f"P0 failed: git fetch --prune {a.remote} - {err} (fail-closed, aborting)")
+        checks["fetch"] = OK
+    else:
+        checks["fetch"] = SKIP
+
+    base_sha = rev(repo, f"{a.remote}/{a.base}")
+    if not base_sha:
+        die(f"baseline {a.remote}/{a.base} does not exist")
+    extra_bases = [f"{a.remote}/{b}" for b in a.extra_base if rev(repo, f"{a.remote}/{b}")]
+
+    protected = set(a.protected)
+    wl = a.whitelist
+
+    # occupancy snapshot
+    panes_status, panes = pane_cwds(a.herdr_bin)
+    proc_status, procs = proc_cwds()
+    docker_status, dockers = (OK, set()) if not a.docker else docker_mounts()
+    checks["pane"] = panes_status
+    checks["proc"] = proc_status
+    checks["docker"] = docker_status
+    mr_status, mrs = (SKIP, None) if a.no_mr else open_mr_sources(repo, a.remote)
+    checks["mr"] = mr_status
+
+    wts = parse_worktrees(repo)
+    checked_out = {w["branch"] for w in wts if w.get("branch")}
+
+    def content_landed(ref):
+        if is_ancestor(repo, ref, f"{a.remote}/{a.base}"):
+            return True, f"∈{a.remote}/{a.base}"
+        for eb in extra_bases:
+            if is_ancestor(repo, ref, eb):
+                return True, f"∈{eb}"
+        return False, "not in dev"
+
+    # ---- worktrees ----
+    wt_rows = []
+    for w in wts:
+        r = {"kind": "worktree", "name": w["name"], "path": w["path"], "head": w["head"],
+             "branch": w["branch"], "reasons": [], "verdict": "BLOCKED"}
+        if w.get("locked"):
+            r["reasons"].append("worktree is git-locked")
+        if w["is_main"]:
+            r.update(verdict="PROTECTED", reasons=["main worktree"])
+            wt_rows.append(r); continue
+        if w.get("prunable"):
+            r.update(verdict="PRUNE", reasons=["directory no longer exists (git worktree prune can clean it)"])
+            wt_rows.append(r); continue
+        if w["detached"]:
+            r.update(verdict="MANUAL", reasons=["detached: no branch to compare, hand to a human"])
+            wt_rows.append(r); continue
+        if w["branch"] in protected:
+            r.update(verdict="PROTECTED", reasons=[f"branch {w['branch']} is protected"])
+            wt_rows.append(r); continue
+        landed, why = content_landed(w["head"])
+        r["landed"] = why
+        if not landed:
+            r["reasons"].append(f"W2 no: {why}")
+        else:
+            r["reasons"].append(f"W2 yes: {why}")
+        # W3
+        rc, out, _ = git(w["path"], "status", "--porcelain", "--untracked-files=no")
+        tracked_dirty = [l for l in out.splitlines() if l.strip()]
+        entries = untracked_entries(w["path"]) or []
+        outside = [(k, p) for (k, p) in entries if not matches_whitelist(p, wl)]
+        r["files_outside_whitelist"] = dedupe_paths([p for _, p in outside])
+        grouped = grouped_commit_count(repo, w["head"], a.remote)
+        r["tracked_dirty"] = tracked_dirty
+        r["unpushed_commits"] = grouped
+        if tracked_dirty:
+            r["reasons"].append(f"W3 no: {len(tracked_dirty)} tracked changes not committed")
+        if grouped:
+            r["reasons"].append(f"W3 no: {grouped} commits not on any {a.remote}/*")
+        # W4
+        mtime, newest_f = newest_mtime(w["path"])
+        idle_h = (time.time() - mtime) / 3600 if mtime else 1e9
+        r["newest_mtime"] = dt.datetime.fromtimestamp(mtime).astimezone().isoformat() if mtime else None
+        r["newest_file"] = newest_f
+        r["idle_hours"] = round(idle_h, 2)
+        occ = occupancy_for(w["path"], panes, procs, dockers)
+        if a.ignore_idle:
+            idle_ok = True
+        else:
+            idle_ok = idle_h >= a.idle_hours
+        r["occupancy"] = occ
+        if occ:
+            r["reasons"].append("W4 no: " + "; ".join(occ))
+        elif not idle_ok:
+            r["reasons"].append(f"W4 no: activity within {idle_h:.2f}h (< {a.idle_hours}h)")
+        else:
+            r["reasons"].append(f"W4 yes: not in use, quiet for {idle_h:.2f}h")
+
+        gates = (not tracked_dirty) and not grouped and not occ and idle_ok and landed and not w.get("locked")
+        if not gates:
+            r["verdict"] = "BLOCKED"
+        elif r["files_outside_whitelist"]:
+            r["verdict"] = "T2"   # safe to delete after archiving these files
+        else:
+            r["verdict"] = "T1"
+        wt_rows.append(r)
+
+    # ---- local branches ----
+    rc, out, _ = git(repo, "for-each-ref", "--format=%(refname:short)\t%(objectname)",
+                     "refs/heads/")
+    lb_rows = []
+    for line in out.splitlines():
+        name, tip = line.split("\t")
+        r = {"kind": "local_branch", "name": name, "head": tip, "reasons": [], "verdict": "BLOCKED"}
+        if name in protected:
+            r.update(verdict="PROTECTED", reasons=["is protected"])
+        elif name in checked_out:
+            r.update(verdict="BLOCKED", reasons=["L2 no: checked out by a worktree"])
+        else:
+            landed, why = content_landed(tip)
+            r["landed"] = why
+            grouped = grouped_commit_count(repo, tip, a.remote)
+            mr = (mrs or {}).get(name)
+            if mr:
+                r.update(verdict="BLOCKED", reasons=[f"L4 no: open MR {','.join(mr)}"])
+            elif landed:
+                r.update(verdict="T1", reasons=[f"L3 yes: {why}"])
+            else:
+                r.update(verdict="T2", reasons=["L3 no: archive first (bundle)"])
+            if grouped:
+                r["reasons"].append(f"{grouped} commits not on any {a.remote}/* (archive fallback)")
+                r["unpushed_commits"] = grouped
+        lb_rows.append(r)
+
+    # ---- remote branches ----
+    rc, out, _ = git(repo, "for-each-ref",
+                     f"--format=%(refname:lstrip=3)\t%(objectname)", f"refs/remotes/{a.remote}/")
+    rb_rows = []
+    for line in out.splitlines():
+        name, tip = line.split("\t")
+        r = {"kind": "remote_branch", "name": name, "head": tip, "reasons": [], "verdict": "BLOCKED"}
+        if name == "HEAD":
+            continue
+        if name in protected:
+            r.update(verdict="PROTECTED", reasons=["is protected"])
+        elif not a.allow_release and name.startswith("release/"):
+            r.update(verdict="MANUAL", reasons=["O4 no: release/* requires manual approval (--allow-release)"])
+        else:
+            landed, why = content_landed(tip)
+            r["landed"] = why
+            mr = (mrs or {}).get(name)
+            if mr:
+                r.update(verdict="BLOCKED", reasons=[f"O3 no: open MR {','.join(mr)}"])
+            elif landed:
+                r.update(verdict="T1", reasons=[f"O2 yes: {why}"])
+            else:
+                r.update(verdict="T2", reasons=["O2 no: archive first (bundle)"])
+        rb_rows.append(r)
+
+    plan = {
+        "tool": "refs-reclaim", "version": VERSION, "generated_at": dt.datetime.now().astimezone().isoformat(),
+        "repo": repo, "remote": a.remote, "base": a.base, "base_sha": base_sha,
+        "extra_bases": extra_bases, "protected": sorted(protected), "whitelist": wl,
+        "idle_hours": a.idle_hours, "checks": checks,
+        "appliable": (checks.get("pane") == "ok" and checks.get("proc") == "ok"
+                      and checks.get("mr") in (OK, SKIP)
+                      and checks.get("fetch") == OK),
+        "worktrees": wt_rows, "local_branches": lb_rows, "remote_branches": rb_rows,
+    }
+    plan["summary"] = summarize(plan)
+    return plan
+
+
+def summarize(plan):
+    s = {}
+    for key in ("worktrees", "local_branches", "remote_branches"):
+        c = {}
+        for r in plan[key]:
+            c[r["verdict"]] = c.get(r["verdict"], 0) + 1
+        s[key] = c
+    return s
+
+
+def render_summary(plan, jpath, mpath):
+    """For the agent: list names only, keep the first reason; the full table is in md/json."""
+    L = [f"refs-reclaim plan  repo={plan['repo']}",
+         f"base={plan['remote']}/{plan['base']}@{plan['base_sha'][:12]}  "
+         f"checks={json.dumps(plan['checks'], ensure_ascii=False)}  appliable={plan['appliable']}"]
+    for key, title in (("worktrees", "worktree"), ("local_branches", "local branch"),
+                       ("remote_branches", "remote branch")):
+        for tier in ("T1", "T2"):
+            rows = [r for r in plan[key] if r["verdict"] == tier]
+            if rows:
+                L.append(f"{tier} {title} ({len(rows)}): " + ", ".join(r["name"] for r in rows))
+        for tier in ("PROTECTED", "MANUAL", "PRUNE", "BLOCKED"):
+            for r in plan[key]:
+                if r["verdict"] != tier:
+                    continue
+                why = "; ".join(r["reasons"])[:90]
+                L.append(f"{tier:9} {title}: {r['name']} — {why}")
+    L.append(f"plan={jpath}")
+    L.append(f"md  ={mpath}")
+    L.append("Next: archive (--plan, --archive-manifest) -> apply (add --yes after human approval)")
+    return "\n".join(L)
+
+
+def render_md(plan):
+    L = []
+    L.append(f"# refs-reclaim plan — {plan['repo']}")
+    L.append("")
+    L.append(f"- generated: {plan['generated_at']}")
+    L.append(f"- baseline: `{plan['remote']}/{plan['base']}` = `{plan['base_sha'][:12]}`"
+             + (f", extra baselines {plan['extra_bases']}" if plan.get("extra_bases") else ""))
+    L.append(f"- checks: {json.dumps(plan['checks'], ensure_ascii=False)}")
+    L.append(f"- appliable (all in-use/MR checks trustworthy): **{plan['appliable']}**  "
+             f"(do not run apply when false)")
+    L.append("")
+    L.append("Verdicts: `T1`=safe to delete; `T2`=archive then delete; `PROTECTED`/`MANUAL`/`PRUNE`/`BLOCKED`=do not delete.")
+    L.append("")
+
+    def table(title, rows, cols):
+        L.append(f"## {title}")
+        L.append("")
+        L.append("| " + " | ".join(cols) + " |")
+        L.append("|" + "---|" * len(cols))
+        for r in rows:
+            cells = []
+            for c in cols:
+                v = r.get(c)
+                if isinstance(v, list):
+                    v = "; ".join(str(x) for x in v)
+                cells.append("" if v is None else str(v))
+            L.append("| " + " | ".join(cells) + " |")
+        L.append("")
+
+    table("worktrees", plan["worktrees"],
+          ["verdict", "name", "branch", "head", "landed", "tracked_dirty",
+           "unpushed_commits", "files_outside_whitelist", "idle_hours", "occupancy", "reasons"])
+    table("local branches", plan["local_branches"], ["verdict", "name", "head", "reasons"])
+    table("remote branches", plan["remote_branches"], ["verdict", "name", "head", "reasons"])
+    L.append("## summary")
+    L.append("")
+    L.append("```")
+    L.append(json.dumps(plan["summary"], indent=2, ensure_ascii=False))
+    L.append("```")
+    return "\n".join(L)
+
+
+# --------------------------------------------------------------------------- #
+# archive (P3)
+# --------------------------------------------------------------------------- #
+def cmd_archive(a, plan):
+    outdir = os.path.abspath(plan["archive_dir"]) if plan.get("archive_dir") else \
+        os.path.abspath(a.outdir or os.path.join(os.path.dirname(plan["repo"]), ".archive"))
+    os.makedirs(outdir, exist_ok=True)
+    stamp = now_stamp()
+    manifest = {"tool": "refs-reclaim", "version": VERSION, "phase": "P3-archive",
+                "generated_at": dt.datetime.now().astimezone().isoformat(),
+                "repo": plan["repo"], "source_plan": getattr(a, "plan", None),
+                "outdir": outdir, "bundle": None, "files": [], "verified": False}
+
+    bundle_name = a.bundle_name or f"{os.path.basename(plan['repo'])}-refs-{stamp}.bundle"
+    bundle = os.path.join(outdir, bundle_name)
+    if os.path.exists(bundle):
+        die(f"bundle already exists, choose another name: {bundle}")
+    print(f"[P3] git bundle create {bundle} --all")
+    rc, _, err = run(["git", "-C", plan["repo"], "bundle", "create", bundle, "--all"])
+    if rc:
+        die(f"bundle create failed: {err}")
+    rc, out, err = run(["git", "-C", plan["repo"], "bundle", "verify", bundle])
+    if rc:
+        die(f"bundle verify failed: {err}\nfail-closed: not continuing.")
+    heads = run(["git", "-C", plan["repo"], "bundle", "list-heads", bundle])[1].splitlines()
+    manifest["bundle"] = {"path": bundle, "sha256": sha256_file(bundle),
+                          "bytes": os.path.getsize(bundle), "refs": len(heads),
+                          "verify": out.splitlines()[:3]}
+    manifest["verified"] = True
+    print(f"[P3] bundle ok: {bundle} ({len(heads)} refs, sha256={manifest['bundle']['sha256'][:16]}…)")
+
+    # Untracked files outside the whitelist: copy them whole (grouped by worktree)
+    for r in plan["worktrees"]:
+        files = r.get("files_outside_whitelist") or []
+        if not files or r["verdict"] not in ("T1", "T2"):
+            continue
+        dest = os.path.join(outdir, f"files-{r['name']}-{stamp}")
+        print(f"[P3] archived {len(files)} untracked entries <- {r['name']}")
+        for rel in files:
+            top = rel.rstrip("/")
+            src = os.path.join(r["path"], top)
+            if not os.path.exists(src):
+                continue
+            tgt = os.path.join(dest, top)
+            os.makedirs(os.path.dirname(tgt), exist_ok=True)
+            if os.path.isdir(src):
+                shutil.copytree(src, tgt, symlinks=True, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, tgt)
+            if os.path.isfile(tgt):
+                manifest["files"].append({"from": src, "to": tgt,
+                                          "sha256": sha256_file(tgt)})
+            else:
+                for root, _, fs in os.walk(tgt):
+                    for f in fs:
+                        fp = os.path.join(root, f)
+                        manifest["files"].append({"from": fp.replace(dest, r["path"], 1),
+                                                  "to": fp, "sha256": sha256_file(fp)})
+    mpath = os.path.join(outdir, f"archive-{stamp}.json")
+    with open(mpath, "w") as fh:
+        json.dump(manifest, fh, indent=2, ensure_ascii=False)
+    print(f"[P3] manifest: {mpath}")
+    if a.yes:
+        print("[P3] done. Next: refs-reclaim apply --plan <plan.json> "
+              f"--archive-manifest {mpath} --yes")
+    return manifest
+
+
+# --------------------------------------------------------------------------- #
+# apply (P4-P6)
+# --------------------------------------------------------------------------- #
+def cmd_apply(a, plan, manifest):
+    if not a.yes:
+        die("apply requires --yes (make sure it is archived and a human approved)")
+    if not manifest.get("verified"):
+        die("archive manifest is not verified: run archive first")
+    bundle = manifest["bundle"]
+    if sha256_file(bundle["path"]) != bundle["sha256"]:
+        die("bundle sha256 does not match the manifest: refusing to run")
+    if run(["git", "-C", plan["repo"], "bundle", "verify", bundle["path"]])[0]:
+        die("bundle verify failed: refusing to run")
+    if not plan.get("appliable") and not a.force_unsafe:
+        die(f"plan.appliable=false ({plan['checks']}): in-use/MR checks are not trustworthy, refusing to run"
+            " (add --force-unsafe to run anyway)")
+
+    repo, remote, base = plan["repo"], plan["remote"], plan["base"]
+    scope = set(a.only)
+    log = {"tool": "refs-reclaim", "phase": "P4-P6-apply",
+           "started_at": dt.datetime.now().astimezone().isoformat(),
+           "done": [], "skipped": [], "failed": []}
+
+    # P4 re-check
+    cur_base = rev(repo, f"{remote}/{base}")
+    if cur_base != plan["base_sha"] and not a.allow_base_move:
+        die(f"baseline moved: plan={plan['base_sha'][:12]} now={cur_base[:12]}"
+            " (re-plan, or --allow-base-move)")
+    panes_status, panes = pane_cwds(a.herdr_bin)
+    proc_status, procs = proc_cwds()
+    _, dockers = (OK, set()) if not a.docker else docker_mounts()
+    mr_status, mrs = (SKIP, {}) if a.no_mr else open_mr_sources(repo, remote)
+
+    def still_free(path):
+        if panes_status != "ok" or proc_status != "ok":
+            if a.force_unsafe:
+                return True, f"--force-unsafe: in-use check not trustworthy (pane={panes_status} proc={proc_status})"
+            return False, f"in-use check not trustworthy: pane={panes_status} proc={proc_status}"
+        occ = occupancy_for(path, panes, procs, dockers)
+        return (not occ), "; ".join(occ) or "free"
+
+    def head_now(ref_or_path, is_wt):
+        return rev(ref_or_path, "HEAD") if is_wt else rev(repo, ref_or_path)
+
+    if "worktrees" in scope:
+        for r in plan["worktrees"]:
+            if r["verdict"] not in ("T1", "T2"):
+                continue
+            free, why = still_free(r["path"])
+            cur = head_now(r["path"], True)
+            if not free:
+                log["skipped"].append({"name": r["name"], "why": why}); print(f"  skip {r['name']}: {why}"); continue
+            if cur != r["head"]:
+                log["skipped"].append({"name": r["name"], "why": f"HEAD changed {r['head'][:8]}->{(cur or '?')[:8]}"})
+                print(f"  skip {r['name']}: HEAD moved"); continue
+            if r.get("files_outside_whitelist"):
+                purged, bad = [], []
+                for rel in r["files_outside_whitelist"]:
+                    src = os.path.join(r["path"], rel.rstrip("/"))
+                    if not os.path.lexists(src):
+                        continue
+                    if verify_archived(manifest, src):
+                        purged.append(src)
+                    else:
+                        bad.append(rel)
+                if bad and not a.force_unsafe:
+                    log["skipped"].append({"name": r["name"],
+                                           "why": f"non-whitelisted files not archived/hash mismatch: {bad}"})
+                    print(f"  skip {r['name']}: not archived or hash mismatch {bad}"); continue
+                for p in purged:
+                    purge_path(p)
+                    print(f"  [P4] archived and removed {p}")
+                r["purged"] = purged
+            cmd = ["git", "-C", repo, "worktree", "remove", r["path"]]
+            print(f"  [P4] {' '.join(cmd)}")
+            rc, out, err = run(cmd)
+            (log["done"] if rc == 0 else log["failed"]).append(
+                {"kind": "worktree", "name": r["name"], "sha": r["head"], "rc": rc, "err": err})
+            if rc:
+                print(f"    !! failed: {err} (fail-closed: stopping further worktrees)")
+                break
+
+    if "branches" in scope:
+        for r in plan["local_branches"]:
+            if r["verdict"] not in ("T1", "T2"):
+                continue
+            cur = rev(repo, f"refs/heads/{r['name']}")
+            if cur != r["head"]:
+                log["skipped"].append({"name": r["name"], "why": "tip changed"}); continue
+            if r["verdict"] == "T1":
+                cmd = ["git", "-C", repo, "branch", "-d", r["name"]]
+            else:
+                if not a.allow_unmerged_branch:
+                    log["skipped"].append({"name": r["name"], "why": "T2 requires --allow-unmerged-branch"})
+                    print(f"  skip branch {r['name']}: T2 requires --allow-unmerged-branch"); continue
+                cmd = ["git", "-C", repo, "branch", "-D", r["name"]]
+            print(f"  [P5] {' '.join(cmd)}")
+            rc, out, err = run(cmd)
+            (log["done"] if rc == 0 else log["failed"]).append(
+                {"kind": "local_branch", "name": r["name"], "sha": r["head"], "rc": rc, "err": err})
+
+    if "remote-branches" in scope:
+        for r in plan["remote_branches"]:
+            if r["verdict"] not in ("T1", "T2"):
+                continue
+            if mr_status == "ok" and mrs.get(r["name"]):
+                log["skipped"].append({"name": r["name"], "why": "open MR appeared"}); continue
+            if r["verdict"] == "T2" and not a.allow_unmerged_branch:
+                log["skipped"].append({"name": r["name"], "why": "T2 requires --allow-unmerged-branch"}); continue
+            ref = f"refs/heads/{r['name']}"
+            cmd = ["git", "-C", repo, "push", "--delete",
+                   f"--force-with-lease={ref}:{r['head']}", remote, ref]
+            print(f"  [P6] {' '.join(cmd)}")
+            rc, out, err = run(cmd)
+            (log["done"] if rc == 0 else log["failed"]).append(
+                {"kind": "remote_branch", "name": r["name"], "sha": r["head"], "rc": rc, "err": err})
+            if rc:
+                print(f"    !! failed: {err}")
+
+    # P7
+    if "worktrees" in scope:
+        run(["git", "-C", repo, "worktree", "prune"])
+    log["finished_at"] = dt.datetime.now().astimezone().isoformat()
+    outpath = a.log or os.path.join(os.path.dirname(bundle["path"]), f"apply-{now_stamp()}.json")
+    with open(outpath, "w") as fh:
+        json.dump(log, fh, indent=2, ensure_ascii=False)
+    print(f"\n[P7] log: {outpath}")
+    print(f"      done={len(log['done'])} skipped={len(log['skipped'])} failed={len(log['failed'])}")
+    if log["failed"]:
+        print("      failures present -> handle each by hand; do not re-run the whole batch.")
+
+
+# --------------------------------------------------------------------------- #
+def main():
+    ap = argparse.ArgumentParser(description="Safely reclaim git worktrees, local branches and remote branches")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--repo", default=".", help="repository/main worktree directory")
+    common.add_argument("--remote", default="origin")
+    common.add_argument("--base", default="dev", help="baseline branch (where content lands)")
+    common.add_argument("--extra-base", action="append", default=[],
+                        help="extra accepted destination branches (e.g. preprod); default is dev only")
+    common.add_argument("--protected", default=",".join(DEFAULT_PROTECTED),
+                        help="protected branch names, comma-separated")
+    common.add_argument("--whitelist", default=",".join(DEFAULT_WHITELIST),
+                        help="reproducible whitelist directories, comma-separated")
+    common.add_argument("--idle-hours", type=float, default=2.0,
+                        help="W4 quiet-time threshold (hours)")
+    common.add_argument("--ignore-idle", action="store_true", help="disable the quiet-time criterion")
+    common.add_argument("--no-mr", action="store_true", help="skip the MR lookup (result=SKIP, unsafe)")
+    common.add_argument("--no-fetch", action="store_true", help="skip git fetch (result=SKIP, unsafe)")
+    common.add_argument("--docker", action="store_true", help="count docker bind mounts as in use")
+    common.add_argument("--herdr-bin", default="herdr", help="herdr executable (use a fake in tests)")
+    common.add_argument("--allow-release", action="store_true", help="allow release/* to be judged")
+    common.add_argument("--outdir", default=None, help="archive directory (default <parent of repo>/.archive)")
+
+    p_plan = sub.add_parser("plan", parents=[common], help="P0-P2 read-only: produce the classification list")
+    p_plan.add_argument("--json", default=None)
+    p_plan.add_argument("--md", default=None)
+    p_plan.add_argument("--summary-only", action="store_true",
+                         help="print only a compact summary (for the agent; the full table still goes to --md/--json)")
+
+    p_arch = sub.add_parser("archive", parents=[common], help="P3 archive: bundle+verify+files")
+    p_arch.add_argument("--plan", required=True)
+    p_arch.add_argument("--bundle-name", default=None)
+    p_arch.add_argument("--yes", action="store_true")
+
+    p_apply = sub.add_parser("apply", parents=[common], help="P4-P6 execute deletion")
+    p_apply.add_argument("--plan", required=True)
+    p_apply.add_argument("--archive-manifest", required=True)
+    p_apply.add_argument("--only", action="append", default=["worktrees", "branches", "remote-branches"],
+                         choices=["worktrees", "branches", "remote-branches"])
+    p_apply.add_argument("--yes", action="store_true")
+    p_apply.add_argument("--allow-base-move", action="store_true")
+    p_apply.add_argument("--allow-unmerged-branch", action="store_true",
+                         help="allow deleting T2 (content not in dev, archive only)")
+    p_apply.add_argument("--force-unsafe", action="store_true")
+    p_apply.add_argument("--log", default=None)
+
+    a = ap.parse_args()
+    a.protected = [x for x in a.protected.split(",") if x]
+    a.whitelist = [x for x in a.whitelist.split(",") if x]
+
+    if a.cmd == "plan":
+        plan = build_plan(a)
+        outdir = os.path.abspath(a.outdir or os.path.join(os.path.dirname(plan["repo"]), ".archive"))
+        plan["archive_dir"] = outdir
+        os.makedirs(outdir, exist_ok=True)
+        stamp = now_stamp()
+        jpath = a.json or os.path.join(outdir, f"plan-{os.path.basename(plan['repo'])}-{stamp}.json")
+        mpath = a.md or os.path.join(outdir, f"plan-{os.path.basename(plan['repo'])}-{stamp}.md")
+        with open(jpath, "w") as fh:
+            json.dump(plan, fh, indent=2, ensure_ascii=False)
+        with open(mpath, "w") as fh:
+            fh.write(render_md(plan))
+        print(render_summary(plan, jpath, mpath) if a.summary_only else render_md(plan))
+        if not a.summary_only:
+            print(f"\n[P2] plan: {jpath}\n      md  : {mpath}")
+        if not plan["appliable"]:
+            print("      ⚠ appliable=false (in-use/MR checks not trustworthy) -> do not apply", file=sys.stderr)
+    elif a.cmd == "archive":
+        plan = json.load(open(a.plan))
+        if not plan.get("appliable") and not a.yes:
+            die("plan.appliable=false: resolve the untrustworthy checks first")
+        cmd_archive(a, plan)
+    elif a.cmd == "apply":
+        if not a.yes:
+            die("apply requires --yes (report the list, archive and verify, then run)")
+        try:
+            plan = json.load(open(a.plan))
+            manifest = json.load(open(a.archive_manifest))
+        except OSError as e:
+            die(f"cannot read --plan / --archive-manifest: {e}")
+        cmd_apply(a, plan, manifest)
+
+
+if __name__ == "__main__":
+    main()
