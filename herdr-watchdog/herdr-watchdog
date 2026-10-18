@@ -155,6 +155,12 @@ def where(args):
     """-> (session, tab, err)"""
     session = args.session or os.environ.get("HERDR_SESSION")
     tab = args.tab or os.environ.get("HERDR_TAB_ID")
+    if not session and tab:
+        # herdr does not export HERDR_SESSION for the default session. If exactly
+        # one session is running, that is the one this pane belongs to.
+        sessions = running_sessions(os.environ.get("HERDR_BIN_PATH") or os.environ.get("HERDR_BIN") or "herdr")
+        if sessions and len(sessions) == 1:
+            session = sessions[0]
     if not session or not tab:
         return None, None, "cannot locate the file: need HERDR_SESSION / HERDR_TAB_ID (or --session/--tab)"
     return session, tab, None
@@ -213,8 +219,12 @@ def cmd_show(args):
             print(err)
             return 1
         files = [flag_path(session, tab)]
-    elif os.environ.get("HERDR_SESSION") and os.environ.get("HERDR_TAB_ID"):
-        files = [flag_path(os.environ["HERDR_SESSION"], os.environ["HERDR_TAB_ID"])]
+    elif os.environ.get("HERDR_TAB_ID"):
+        session, tab, err = where(args)
+        if err:
+            print(err)
+            return 1
+        files = [flag_path(session, tab)]
     else:
         try:
             files = [os.path.join(HB_DIR, f) for f in sorted(os.listdir(HB_DIR)) if f.endswith(".json")]

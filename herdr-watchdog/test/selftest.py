@@ -689,5 +689,27 @@ check("E18 no snapshot: no crash, says no snapshot",
       "no snapshot" in rows[0] and "no snapshot" in all_text, all_text)
 hb.HB_DIR = os.path.dirname(HB)   # restore
 
+# where(): herdr omits HERDR_SESSION for the default session; a single running
+# session is unambiguous, two are not.
+import types
+old_env = {k: os.environ.get(k) for k in ("HERDR_SESSION", "HERDR_TAB_ID")}
+old_rs = hb.running_sessions
+os.environ.pop("HERDR_SESSION", None)
+os.environ["HERDR_TAB_ID"] = "wE:tX"
+a = types.SimpleNamespace(session=None, tab=None)
+hb.running_sessions = lambda _bin: ["default"]
+s, t, err = hb.where(a)
+check("F1 one running session: where() uses it when HERDR_SESSION is missing",
+      (s, t, err) == ("default", "wE:tX", None), "%r %r %r" % (s, t, err))
+hb.running_sessions = lambda _bin: ["a", "b"]
+s, t, err = hb.where(a)
+check("F2 two running sessions: where() still asks for --session", err is not None, "%r" % (err,))
+hb.running_sessions = old_rs
+for k, v in old_env.items():
+    if v is None:
+        os.environ.pop(k, None)
+    else:
+        os.environ[k] = v
+
 print("\n================ %s ================" % ("all passed" if not fails else "failed: %s" % fails))
 sys.exit(1 if fails else 0)

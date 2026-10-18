@@ -47,6 +47,9 @@ pi install git:github.com/HYPERVAPOR/herdr-pair-coding
 P="$HOME/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding"
 ```
 
+Restart any agent that was already running before this install: a live process
+does not pick up a new package.
+
 `herdr integration install pi` writes `~/.pi/agent/extensions/herdr-agent-state.ts`;
 herdr owns that file, do not edit it.
 
