@@ -14,6 +14,19 @@ Every piece here exists for that loop. The small everyday tools — `/tools`,
 [`pi-utils`](https://github.com/HYPERVAPOR/pi-utils), because they have nothing
 to do with pair coding.
 
+## Set up with your agent
+
+Copy this line into pi, Claude Code, Codex, or any agent that can read a URL and
+run shell commands:
+
+```text
+Help me set up pi-dev-bundle: https://raw.githubusercontent.com/HYPERVAPOR/pi-dev-bundle/main/skills/pi-dev-bundle/SKILL.md
+```
+
+The target is a skill: it explains the model, checks what is already installed,
+and walks through pi, herdr, the bundle, the profiles and the watchdog. Read it
+yourself first if you prefer.
+
 ## The loop
 
 ```text
@@ -46,18 +59,9 @@ worker pane                          reviewer pane
 - `python3` for `herdr-last-answer`, `herdr-watchdog`, `refs-reclaim`
 - `git` for `refs-reclaim`; `glab` optional (merge-request state)
 
-## Setup
+## Manual setup
 
-The low-friction path is to let your agent do it. Paste this into pi, Claude
-Code, Codex, or any agent that can read a URL and run shell commands:
-
-> Help me set up pi-dev-bundle: https://raw.githubusercontent.com/HYPERVAPOR/pi-dev-bundle/main/skills/pi-dev-bundle/SKILL.md
-
-That file is a skill: it explains the model, checks what is already installed,
-and walks through pi, herdr, the bundle, the profiles and the watchdog. Read it
-yourself first if you prefer.
-
-Manual:
+Prefer to do it yourself:
 
 ```bash
 # 1. pi + herdr
