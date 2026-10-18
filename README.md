@@ -1,7 +1,8 @@
-# pi-dev-bundle
+# herdr-pair-coding
 
-A **worker–reviewer pair-coding** setup for [pi](https://pi.dev) on top of
-[herdr](https://herdr.dev).
+A **worker–reviewer pair-coding** setup on top of
+[herdr](https://herdr.dev). The core is three CLI tools; [pi](https://pi.dev)
+gets the richest integration, but the tools work from any agent.
 
 Two agents work the same task in two panes: the **worker** writes, the
 **reviewer** reads and pushes back. This bundle is the glue that makes that
@@ -20,7 +21,7 @@ Copy this line into pi, Claude Code, Codex, or any agent that can read a URL and
 run shell commands:
 
 ```text
-Help me set up pi-dev-bundle: https://raw.githubusercontent.com/HYPERVAPOR/pi-dev-bundle/main/skills/pi-dev-bundle/SKILL.md
+Help me set up herdr-pair-coding: https://raw.githubusercontent.com/HYPERVAPOR/herdr-pair-coding/main/skills/herdr-pair-coding/SKILL.md
 ```
 
 The target is a skill: it explains the model, checks what is already installed,
@@ -54,10 +55,11 @@ worker pane                          reviewer pane
 
 ## Requirements
 
-- pi and Node 22.19+
-- [herdr](https://herdr.dev) for the pair-coding layer
-- `python3` for `herdr-last-answer`, `herdr-watchdog`, `refs-reclaim`
+- [herdr](https://herdr.dev) — all three tools read panes or flags through it
+- `python3`
 - `git` for `refs-reclaim`; `glab` optional (merge-request state)
+- pi and Node 22.19+ only if you want the tool wrappers, the profiles and the
+  inline status (optional)
 
 ## Manual setup
 
@@ -70,7 +72,7 @@ curl -fsSL https://herdr.dev/install.sh | sh
 herdr integration install pi    # writes ~/.pi/agent/extensions/herdr-agent-state.ts
 
 # 2. this bundle
-pi install git:github.com/HYPERVAPOR/pi-dev-bundle
+pi install git:github.com/HYPERVAPOR/herdr-pair-coding
 
 # 3. profiles: copy the examples, then edit paths and rule files
 mkdir -p ~/.pi/agent/profiles
@@ -113,22 +115,45 @@ copy non-git files + sha256 manifest) → `apply` (re-check, then delete). A ref
 is only removed if its tip is already contained in `origin/dev` or has been
 archived and verified. Remote deletions use an expected-sha lease.
 
-## Enabling the tool extensions
+## Works without pi
 
-Three extensions register model-facing tools. Installing the bundle does not
+The three tools are plain CLIs; the pi extensions are thin adapters around
+them.
+
+```bash
+herdr-last-answer <pane|name> [--n N] [--tools]
+herdr-watchdog daemon
+herdr-watchdog set --action block --reason "waiting on a human"
+refs-reclaim plan --repo <dir>
+```
+
+Any agent that can run shell commands can use these. What pi adds:
+
+- each CLI becomes a model-facing tool, so the model calls `last_answer`
+  instead of assembling a shell line (the old failure was
+  `herdr agent herdr-last-answer`);
+- `--tools` allowlists keep `hb_block` and `refs_reclaim` visible only to the
+  role that needs them;
+- `hb_block` renders its state inline in the pi status bar
+  (`hb_block:true 😴` / `hb_block:false 👂`), so the reviewer sees whether the
+  watchdog is silenced without opening a file.
+
+## pi integration: mounting the tools
+
+If you use pi, three extensions register model-facing tools. Installing the bundle does not
 mount them; load the ones you need. A git package is cloned to
-`~/.pi/agent/git/github.com/HYPERVAPOR/pi-dev-bundle`, so `-e` points there.
+`~/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding`, so `-e` points there.
 
 One-line install (the whole bundle):
 
 ```bash
-pi install git:github.com/HYPERVAPOR/pi-dev-bundle
+pi install git:github.com/HYPERVAPOR/herdr-pair-coding
 ```
 
 Then mount a tool where you need it, either in a profile or in a one-off run:
 
 ```bash
-PKG=~/.pi/agent/git/github.com/HYPERVAPOR/pi-dev-bundle
+PKG=~/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding
 
 # herdr-last-answer: needs herdr + python3
 pi -e "$PKG/herdr-last-answer/last_answer.ts" \
@@ -157,7 +182,7 @@ To load only these three through package filtering instead:
 {
   "packages": [
     {
-      "source": "git:github.com/HYPERVAPOR/pi-dev-bundle",
+      "source": "git:github.com/HYPERVAPOR/herdr-pair-coding",
       "extensions": [
         "herdr-last-answer/last_answer.ts",
         "herdr-watchdog/hb_block.ts",
@@ -183,7 +208,7 @@ To load only one, list only that file:
 {
   "packages": [
     {
-      "source": "git:github.com/HYPERVAPOR/pi-dev-bundle",
+      "source": "git:github.com/HYPERVAPOR/herdr-pair-coding",
       "extensions": ["herdr-last-answer/last_answer.ts"]
     }
   ]

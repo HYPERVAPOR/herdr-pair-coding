@@ -1,5 +1,5 @@
 {
-  "name": "pi-dev-bundle",
+  "name": "herdr-pair-coding",
   "version": "0.1.0",
   "description": "A worker-reviewer pair-coding setup for pi on top of herdr.",
   "keywords": [
@@ -12,7 +12,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/HYPERVAPOR/pi-dev-bundle.git"
+    "url": "git+https://github.com/HYPERVAPOR/herdr-pair-coding.git"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

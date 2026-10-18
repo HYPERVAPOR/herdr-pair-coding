@@ -8,7 +8,7 @@ edit the rule-file paths (`--append-system-prompt`) to match your own setup.
   (silence the watchdog).
 
 They assume the bundle is installed with `pi install git:...`. If you keep a
-checkout instead, set `PI_DEV_BUNDLE` to its path.
+checkout instead, set `HERDR_PAIR` to its path.
 
 Panes must be labelled so the watchdog can pair them:
 

@@ -115,7 +115,7 @@ def main():
             msg("assistant", [thinking(), tool_call("bash", "ls -la /tmp")]),
             msg("toolResult", [tool_result(SECRET + ": this big tool output must never appear in herdr-last-answer" + " noise" * 200)]),
             msg("assistant", [text("first answer: long path %s preserved as-is" % LONG_PATH)]),
-            msg("assistant", [tool_call("read", "/home/user/projects/pi-dev-bundle/herdr-watchdog/herdr-watchdog")]),
+            msg("assistant", [tool_call("read", "/home/user/projects/herdr-pair-coding/herdr-watchdog/herdr-watchdog")]),
             msg("toolResult", [tool_result(SECRET)]),
             msg("assistant", [text("second answer A2")]),
             msg("assistant", [tool_call("edit", "[{\"newText\": \"...\"}]")]),

@@ -1,9 +1,9 @@
 ---
-name: pi-dev-bundle
-description: Install and operate pi-dev-bundle, a worker-reviewer pair-coding setup for pi + herdr (watchdog, last_answer tool, worktree cleanup). Use when the user wants two agents to work as worker and reviewer under herdr, or asks to set up pi-dev-bundle.
+name: herdr-pair-coding
+description: Install and operate herdr-pair-coding, a worker-reviewer pair-coding setup for pi + herdr (watchdog, last_answer tool, worktree cleanup). Use when the user wants two agents to work as worker and reviewer under herdr, or asks to set up herdr-pair-coding.
 ---
 
-# pi-dev-bundle setup
+# herdr-pair-coding setup
 
 Goal: the user ends with two panes, `worker` and `reviewer`, running pi with the
 right tools, plus a watchdog that nudges the pair when it stalls.
@@ -44,8 +44,8 @@ talk to.
 ## 3. Install the bundle
 
 ```bash
-pi install git:github.com/HYPERVAPOR/pi-dev-bundle
-PKG="$HOME/.pi/agent/git/github.com/HYPERVAPOR/pi-dev-bundle"
+pi install git:github.com/HYPERVAPOR/herdr-pair-coding
+PKG="$HOME/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding"
 ```
 
 That installs the code. It does not mount every tool: profiles decide which
@@ -100,7 +100,7 @@ After=default.target
 [Service]
 Type=simple
 Environment=PATH=%h/.local/bin:%h/.pi/agent/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 %h/.pi/agent/git/github.com/HYPERVAPOR/pi-dev-bundle/herdr-watchdog/herdr-watchdog daemon
+ExecStart=/usr/bin/python3 %h/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding/herdr-watchdog/herdr-watchdog daemon
 Restart=on-failure
 RestartSec=15
 
