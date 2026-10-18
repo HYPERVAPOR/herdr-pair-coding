@@ -76,6 +76,68 @@ into one package per extension; that is not the case today.
 | [`herdr-watchdog`](herdr-watchdog/README.md) | `hb_block` tool + watchdog daemon | tool schema + background process | herdr, Python 3 |
 | [`refs-reclaim`](refs-reclaim/README.md) | `refs_reclaim` tool, `/reclaim`, CLI | tool schema | git, Python 3; `glab` optional |
 
+## Enabling the tool extensions
+
+Four extensions register model-facing tools. Installing the bundle does not
+mount them; load the ones you need. A git package is cloned to
+`~/.pi/agent/git/github.com/HYPERVAPOR/pi-dev-bundle`, so `-e` points there.
+
+One-line install (the whole bundle):
+
+```bash
+pi install git:github.com/HYPERVAPOR/pi-dev-bundle
+```
+
+Then mount a tool where you need it, either in a profile or in a one-off run:
+
+```bash
+PKG=~/.pi/agent/git/github.com/HYPERVAPOR/pi-dev-bundle
+
+# deepseek-search: needs a DeepSeek key (/login deepseek)
+pi -e "$PKG/extensions/deepseek-search.ts"
+
+# last-answer: needs herdr + python3
+pi -e "$PKG/last-answer/last_answer.ts" \
+   --tools read,write,edit,ls,bash,last_answer
+
+# herdr-watchdog: needs herdr + python3; also run the daemon (see its README)
+pi -e "$PKG/herdr-watchdog/hb_block.ts" \
+   --tools read,write,edit,ls,bash,hb_block
+
+# refs-reclaim: needs git + python3; glab optional
+pi -e "$PKG/refs-reclaim/reclaim.ts" \
+   --tools read,write,edit,ls,bash,refs_reclaim
+```
+
+- In a profile, keep the `-e` and `--tools` lines and drop the leading `pi`.
+- `--tools` is a whitelist: when you pass it, the tool's name must be listed or
+  the model will not see it. Without `--tools`, a loaded tool is active by
+  default.
+- `herdr-watchdog` also needs the daemon for heartbeat messages
+  (`herdr-watchdog daemon`, or the systemd unit in its README). The `hb_block`
+  tool alone only writes the flag.
+
+To load only these four through package filtering instead:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/HYPERVAPOR/pi-dev-bundle",
+      "extensions": [
+        "extensions/deepseek-search.ts",
+        "last-answer/last_answer.ts",
+        "herdr-watchdog/hb_block.ts",
+        "refs-reclaim/reclaim.ts"
+      ]
+    }
+  ]
+}
+```
+
+Profiles that run `-ne` disable package-loaded extensions, so they still need
+explicit `-e` paths.
+
 ### keepctx
 
 Compacts the conversation with a fixed brevity instruction: keep background,
