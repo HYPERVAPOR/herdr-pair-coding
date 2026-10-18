@@ -711,6 +711,7 @@ for k, v in old_env.items():
     else:
         os.environ[k] = v
 
+hb.HB_DIR = os.path.dirname(snap_p)   # the E-section snapshot directory
 snap = json.load(open(snap_p))
 snap["pid"] = os.getpid()
 json.dump(snap, open(snap_p, "w"))
