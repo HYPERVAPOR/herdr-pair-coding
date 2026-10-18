@@ -1,7 +1,10 @@
 # Example profiles
 
-Two role files for `pi -ne` runs. Copy them to `~/.pi/agent/profiles/`, then
-edit the rule-file paths (`--append-system-prompt`) to match your own setup.
+Two role files for `pi -ne` runs, plus the rule files they load. Copy all four
+to `~/.pi/agent/profiles/`, then edit the rules to match your own setup.
+
+- `worker.conf` + `worker.md.example`
+- `reviewer.conf` + `reviewer.md.example`
 
 - `worker.conf`: writes code, no tools to read other panes.
 - `reviewer.conf`: adds `last_answer` (read the worker's answer) and `hb_block`

@@ -1,6 +1,6 @@
 ---
 name: herdr-pair-coding
-description: Set up or operate herdr-pair-coding: worker-reviewer pair coding on top of herdr. The CLI tools run standalone; pi is optional and adds tool wrappers, role profiles and an inline watchdog status. Use when the user wants two agents to work as worker and reviewer under herdr, or asks to set up herdr-pair-coding.
+description: Set up or operate herdr-pair-coding: worker-reviewer pair coding on top of herdr. 
 ---
 
 # herdr-pair-coding setup
@@ -8,12 +8,8 @@ description: Set up or operate herdr-pair-coding: worker-reviewer pair coding on
 Goal: two panes, `worker` and `reviewer`, each running an agent, plus a
 watchdog that nudges the pair when it stalls.
 
-The three tools are plain CLIs and only need herdr. pi is optional: it turns
-the CLIs into model-facing tools and adds role profiles. Do the required steps
-first; add the pi part only if the user uses pi.
-
-Work through the steps in order. Ask before you install, write to the user's
-dotfiles, or start a background service.
+The three tools are plain CLIs and only need herdr. pi turns
+the CLIs into model-facing tools and adds role profiles.
 
 ## 1. Preflight
 
@@ -24,14 +20,6 @@ herdr --version
 python3 --version
 git --version        # only for refs-reclaim
 ```
-
-Optional, only if the user wants the pi integration:
-
-```bash
-pi --version         # pi ships its own Node, 22.19 or newer
-```
-
-Report what is missing. Do not install anything until the user agrees.
 
 ## 2. Install and wire herdr
 
@@ -76,9 +64,14 @@ agents, run the watchdog. The next two sections are the pi integration.
 
 ## 4. Profiles (pi only)
 
-Create `~/.pi/agent/profiles/worker.conf` and `reviewer.conf` (copies live in
-the bundle under `examples/profiles/`). Each file sets a `PROFILE` array; a
-small shell function runs it:
+Copy the two role files and their rule examples into place:
+
+```bash
+mkdir -p ~/.pi/agent/profiles
+cp "$P"/examples/profiles/*.conf "$P"/examples/profiles/*.md.example ~/.pi/agent/profiles/
+```
+
+Each `.conf` sets a `PROFILE` array; a small shell function runs it:
 
 ```bash
 pi-profile() {
@@ -149,21 +142,12 @@ pauses it.
 
 ## 7. Verify
 
-CLI checks (no pi needed):
+CLI checks:
 
 1. `herdr-last-answer <worker>` prints the worker's last answer text.
 2. `herdr-watchdog run --dry-run` finds one pair and prints what it would do.
 3. Stop typing in both panes for ten minutes (or lower the threshold for a
    test). The watchdog nudges the pair.
-
-pi checks, if step 4 was done:
-
-4. Start the worker with `pi-profile worker`, the reviewer with
-   `pi-profile reviewer`.
-5. In the reviewer, run `/tools`. It should list `last_answer` and `hb_block`
-   with `✓`.
-6. Ask the reviewer to read the worker's last answer. It must use the
-   `last_answer` tool, never `herdr agent herdr-last-answer`.
 
 ## 8. Troubleshooting
 
