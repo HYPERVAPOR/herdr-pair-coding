@@ -50,6 +50,11 @@ P="$HOME/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding"
 Restart any agent that was already running before this install: a live process
 does not pick up a new package.
 
+`pi install` only auto-loads the role guard (a warning hook, no tools) and the
+skill. The tools stay explicit: the profiles mount `last_answer`/`hb_block`, and
+`refs-reclaim/reclaim.ts` is mounted only where cleanup is wanted. A bare `pi`
+gets no tools from this package.
+
 `herdr integration install pi` writes `~/.pi/agent/extensions/herdr-agent-state.ts`;
 herdr owns that file, do not edit it.
 

@@ -45,8 +45,9 @@ refs-reclaim apply   --repo <dir> --plan <plan.json> --archive-manifest <archive
 ```
 
 pi tool `refs_reclaim` (`action=plan|archive|apply`, `confirm=true` required for
-`apply`) and a read-only `/reclaim` command. Load via the package manifest or
-`-e refs-reclaim/reclaim.ts` plus `--tools …,refs_reclaim`.
+`apply`) and a read-only `/reclaim` command. Load it explicitly with
+`-e refs-reclaim/reclaim.ts` plus `--tools …,refs_reclaim`; it is not in the
+package manifest.
 
 ## Test
 

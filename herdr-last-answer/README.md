@@ -6,7 +6,7 @@ pane-width truncation.
 | Face | Used by | How |
 |---|---|---|
 | CLI | humans / tests / scripts | `herdr-last-answer/herdr-last-answer` |
-| Tool `last_answer` | the model (reviewer + master) | package manifest, or `-e herdr-last-answer/last_answer.ts` + `--tools …,last_answer` |
+| Tool `last_answer` | the model (reviewer + master) | `-e herdr-last-answer/last_answer.ts` + `--tools …,last_answer` (not auto-loaded) |
 
 ## Contract
 

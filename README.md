@@ -21,6 +21,11 @@ Help me set up herdr-pair-coding: https://raw.githubusercontent.com/HYPERVAPOR/h
 | [`herdr-last-answer`](herdr-last-answer/README.md) | reviewer reads the worker's answer text, no TUI footer, no width truncation                 |
 | [`refs-reclaim`](refs-reclaim/README.md)           | archives and removes worktrees/branches only after proving them safe                        |
 
+Only the role guard loads in a normal `pi` session; it registers no tool and
+just warns when a pane's label and profile disagree. Everything above is mounted
+explicitly: the role profiles load `last_answer`/`hb_block`, and
+`refs-reclaim/reclaim.ts` only where you ask for it.
+
 ## Safety
 
 `refs-reclaim` is read-only until `archive`/`apply`; `apply` requires

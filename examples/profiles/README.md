@@ -10,7 +10,8 @@ to `~/.pi/agent/profiles/`, then edit the rules to match your own setup.
 - `reviewer.conf`: adds `last_answer` (read the worker's answer) and `hb_block`
   (silence the watchdog).
 
-They assume the bundle is installed with `pi install git:...`. If you keep a
+They assume the bundle is installed with `pi install git:...`. The package does
+not auto-load the tools; these profiles mount them explicitly. If you keep a
 checkout instead, set `HERDR_PAIR` to its path.
 
 Run one with the repo's `bin/pi-profile` script (symlink it into `~/.local/bin`):

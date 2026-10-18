@@ -21,10 +21,7 @@
   },
   "pi": {
     "extensions": [
-      "./role-guard/role_guard.ts",
-      "./herdr-last-answer/last_answer.ts",
-      "./herdr-watchdog/hb_block.ts",
-      "./refs-reclaim/reclaim.ts"
+      "./role-guard/role_guard.ts"
     ],
     "skills": [
       "./skills"
