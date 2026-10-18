@@ -164,7 +164,8 @@ herdr-watchdog top        # read-only live view
 ```
 
 The daemon only reads pane state and sends messages. `~/.herdr/watchdog/PAUSE`
-pauses it.
+pauses it. The watchdog is the only waiter: agents must not poll (`herdr agent
+wait`, sleep loops); they end the turn and the watchdog wakes them.
 
 ## 7. Verify
 
@@ -180,7 +181,8 @@ CLI checks:
 - `last_answer` says "not a herdr subcommand": the model tried shell instead of
   the tool. Put the tool in `--tools` and tell it to call `last_answer`.
 - `last_answer` returns "no readable answer yet": the other side has not
-  answered. Wait; do not retry in a loop.
+  answered. End the turn; do not run `herdr agent wait` or retry in a loop. The
+  watchdog sends the wake-up message.
 - `/tools` does not show a tool: it is not mounted, or `--tools` excluded it.
 - Watchdog finds no pair: the pane labels must contain `worker` and `reviewer`.
 - Watchdog cannot find `herdr` under systemd: add `~/.local/bin` to the unit's

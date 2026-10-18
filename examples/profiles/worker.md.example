@@ -8,4 +8,6 @@ You implement. The reviewer reads your answer and pushes back.
 - When you finish a round, say what changed, what you ran, and what is still
   open. The reviewer reads that answer, not your terminal.
 - If a decision is the human's, say so and stop; do not spin.
+- Never wait on the reviewer yourself: no `herdr agent wait`, no sleep or retry
+  loop. End the turn; the watchdog wakes the pair when the other side is idle.
 - Do not rewrite git history or delete branches. Cleanup is a separate step.

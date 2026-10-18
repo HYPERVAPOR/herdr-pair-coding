@@ -24,7 +24,7 @@ const DESCRIPTION = `Read the answer body from **another pane** (no TUI footer, 
 - The \`herdr-last-answer <target>\` in your rules is this tool. It is a standalone script on PATH, **not a herdr subcommand** (do not write \`herdr agent herdr-last-answer\`).
 - target is a pane id (e.g. \`wE:p1M\`) or an agent name.
 - Use n to read the last N answers; use tools=true to summarize which tools were called in the last answer's turn.
-- It only reads answers that already happened. If the other side has not spoken or the session file is not persisted yet, it says so explicitly; that is not an error. End this response and wait for delivery instead of treating it as "stuck".
+- It only reads answers that already happened. If the other side has not spoken or the session file is not persisted yet, it says so explicitly; that is not an error. End the turn instead of treating it as "stuck"; do not call \`herdr agent wait\` or sleep/poll — the watchdog wakes you.
 - To look at the screen (crash, error, diagnostics), use \`herdr agent read <target> --source recent-unwrapped\`, not this tool.`;
 
 function resolveCli() {
@@ -78,7 +78,7 @@ const lastAnswer = {
           content: [{
             type: "text",
             text: `${params.target} has no readable answer yet (${why})\n`
-              + "-> It has not spoken or has not been persisted. End this response and wait for delivery, or wait for the watchdog to wake you."
+              + "-> It has not spoken yet. End this turn; do not run `herdr agent wait` or a retry loop — the watchdog wakes you when it is idle."
               + " To check the screen, use `herdr agent read <target> --source recent-unwrapped`.",
           }],
           details: undefined,
