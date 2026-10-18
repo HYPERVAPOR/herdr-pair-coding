@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scenario tests for last-answer (fake session jsonl + fake herdr; no real panes, no real requests).
+"""Scenario tests for herdr-last-answer (fake session jsonl + fake herdr; no real panes, no real requests).
 
 Approach: build synthetic session files, write a fake `herdr` that only answers
 `agent get`, point HERDR_BIN at it, run the real script, and assert what it
@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.normpath(os.path.join(HERE, os.pardir, "last-answer"))
+SCRIPT = os.path.normpath(os.path.join(HERE, os.pardir, "herdr-last-answer"))
 VERBOSE = "-v" in sys.argv
 EXIT_NO_ANSWER = 3      # contract: 3 = the other side has not answered yet (including "session file not persisted")
 
@@ -89,7 +89,7 @@ def run(target, *extra, session_path, fake_herdr):
     p = subprocess.run([sys.executable, SCRIPT, target, *extra],
                        capture_output=True, text=True, env=env, timeout=60)
     if VERBOSE:
-        print("     $ last-answer %s %s -> exit %d" % (target, " ".join(extra), p.returncode))
+        print("     $ herdr-last-answer %s %s -> exit %d" % (target, " ".join(extra), p.returncode))
         print("       stdout: %r" % p.stdout[:400])
         print("       stderr: %r" % p.stderr[:400])
     return p
@@ -103,9 +103,9 @@ def clean(label, out):
 
 def main():
     if not os.access(SCRIPT, os.X_OK):
-        print("FAIL last-answer is not executable: %s" % SCRIPT)
+        print("FAIL herdr-last-answer is not executable: %s" % SCRIPT)
         return 1
-    tmp = tempfile.mkdtemp(prefix="last-answer-test-")
+    tmp = tempfile.mkdtemp(prefix="herdr-last-answer-test-")
     fake_herdr = os.path.join(tmp, "fake-herdr")
     write_fake_herdr(fake_herdr)
 
@@ -113,7 +113,7 @@ def main():
     #      A1 holds a long path (to prove no pane-width truncation); A4 follows a turn with 12 tools.
     recs = [msg("user", [text("start")]),
             msg("assistant", [thinking(), tool_call("bash", "ls -la /tmp")]),
-            msg("toolResult", [tool_result(SECRET + ": this big tool output must never appear in last-answer" + " noise" * 200)]),
+            msg("toolResult", [tool_result(SECRET + ": this big tool output must never appear in herdr-last-answer" + " noise" * 200)]),
             msg("assistant", [text("first answer: long path %s preserved as-is" % LONG_PATH)]),
             msg("assistant", [tool_call("read", "/home/user/projects/pi-dev-bundle/herdr-watchdog/herdr-watchdog")]),
             msg("toolResult", [tool_result(SECRET)]),

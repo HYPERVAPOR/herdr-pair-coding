@@ -36,7 +36,7 @@ check("n=2 + tools=true also returns content", out2.content[0].text.length > 40,
 let threw = "";
 try { await t.execute("c3", { target: "wE:nope" }, undefined, undefined, {}); }
 catch (e) { threw = e.message || ""; }
-check("missing target -> throws", /last-answer:/.test(threw), threw.slice(0, 200));
+check("missing target -> throws", /herdr-last-answer:/.test(threw), threw.slice(0, 200));
 
 // 4) The other side has not answered (exit 3) -> must not throw; returns "no readable answer yet".
 const emptyFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "la-")), "empty.jsonl");

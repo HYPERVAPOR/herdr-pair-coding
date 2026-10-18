@@ -219,7 +219,7 @@ dryrun("3 neither side working (-> message B)",
                "[heartbeat] Neither you nor the worker is working.",
                'Finished this round? hb_block(action=block, reason="done")',
                "Waiting for a human decision? Also block (say what you wait for), report to master",
-               "Still have work? Do it; read the worker with last-answer",
+               "Still have work? Do it; read the worker with last_answer",
                "I will ask again unless you block."])
 
 # 3c Both panes have no age (kind=id) -> message unchanged, panes skipped with WARN.

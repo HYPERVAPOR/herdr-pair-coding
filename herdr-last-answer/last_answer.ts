@@ -1,11 +1,11 @@
 // @ts-nocheck
 /**
  * last_answer - read the answer body from another pane (the tool shell around
- * the last-answer/last-answer script).
+ * the herdr-last-answer/herdr-last-answer script).
  *
- * Why wrap it in a tool: `last-answer` is a standalone script on PATH, not a
+ * Why wrap it in a tool: `herdr-last-answer` is a standalone script on PATH, not a
  * herdr subcommand. When the model was asked to assemble the command itself,
- * surrounded by `herdr ...` calls, it produced `herdr agent last-answer` (herdr
+ * surrounded by `herdr ...` calls, it produced `herdr agent herdr-last-answer` (herdr
  * just returned its subcommand list without an error), wasting turns. As a
  * tool, the model calls it by name and this shell assembles argv, so that class
  * of mistake disappears structurally.
@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 
 const DESCRIPTION = `Read the answer body from **another pane** (no TUI footer, no pane-width truncation). This is the canonical way to read answers.
-- The \`last-answer <target>\` in your rules is this tool. It is a standalone script on PATH, **not a herdr subcommand** (do not write \`herdr agent last-answer\`).
+- The \`herdr-last-answer <target>\` in your rules is this tool. It is a standalone script on PATH, **not a herdr subcommand** (do not write \`herdr agent herdr-last-answer\`).
 - target is a pane id (e.g. \`wE:p1M\`) or an agent name.
 - Use n to read the last N answers; use tools=true to summarize which tools were called in the last answer's turn.
 - It only reads answers that already happened. If the other side has not spoken or the session file is not persisted yet, it says so explicitly; that is not an error. End this response and wait for delivery instead of treating it as "stuck".
@@ -30,9 +30,9 @@ const DESCRIPTION = `Read the answer body from **another pane** (no TUI footer, 
 function resolveCli() {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const cands = [
-    path.join(here, "last-answer"),   // bundle layout: CLI sits next to this file
-    path.join(os.homedir(), ".pi", "agent", "bin", "last-answer"),
-    path.join(here, "..", "bin", "last-answer"),
+    path.join(here, "herdr-last-answer"),   // bundle layout: CLI sits next to this file
+    path.join(os.homedir(), ".pi", "agent", "bin", "herdr-last-answer"),
+    path.join(here, "..", "bin", "herdr-last-answer"),
   ];
   for (const c of cands) {
     try {
@@ -41,7 +41,7 @@ function resolveCli() {
       /* ignore: try the next candidate */
     }
   }
-  throw new Error(`last-answer script not found; tried: ${cands.join(", ")}`);
+  throw new Error(`herdr-last-answer script not found; tried: ${cands.join(", ")}`);
 }
 
 const lastAnswer = {
@@ -73,7 +73,7 @@ const lastAnswer = {
       if (e.status === 3) {
         // "has not answered yet" (including "session file not persisted") is not a
         // failure: keep only the first reason line, not the repeated fallback lines.
-        const why = (String(detail).split("\n")[0] || "").replace(/^last-answer:\s*/, "");
+        const why = (String(detail).split("\n")[0] || "").replace(/^herdr-last-answer:\s*/, "");
         return {
           content: [{
             type: "text",

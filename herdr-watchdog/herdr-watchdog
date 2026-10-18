@@ -60,7 +60,7 @@ TEXT_A2 = (TEXT_HEAD + "worker {who} has produced no output (state is still work
 TEXT_B = (TEXT_HEAD + "Neither you nor the worker is working.\n"
           '- Finished this round? hb_block(action=block, reason="done")\n'
           '- Waiting for a human decision? Also block (say what you wait for), report to master\n'
-          '- Still have work? Do it; read the worker with last-answer\n'
+          '- Still have work? Do it; read the worker with last_answer\n'
           "  I will ask again unless you block.")
 LABELS = {"reviewer-stuck": "A1", "worker-stuck": "A2", "quiet": "B"}
 

@@ -1,12 +1,12 @@
-# last-answer
+# herdr-last-answer
 
 Read the plain answer text from **another herdr pane**: no pi TUI footer, no
 pane-width truncation.
 
 | Face | Used by | How |
 |---|---|---|
-| CLI | humans / tests / scripts | `last-answer/last-answer` |
-| Tool `last_answer` | the model (reviewer + master) | package manifest, or `-e last-answer/last_answer.ts` + `--tools …,last_answer` |
+| CLI | humans / tests / scripts | `herdr-last-answer/herdr-last-answer` |
+| Tool `last_answer` | the model (reviewer + master) | package manifest, or `-e herdr-last-answer/last_answer.ts` + `--tools …,last_answer` |
 
 ## Contract
 
@@ -24,6 +24,6 @@ pane-width truncation.
 ## Test
 
 ```bash
-python3 last-answer/test/test_last_answer.py
-node    last-answer/test/test_last_answer_ext.mjs
+python3 herdr-last-answer/test/test_last_answer.py
+node    herdr-last-answer/test/test_last_answer_ext.mjs
 ```

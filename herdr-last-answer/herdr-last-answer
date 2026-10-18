@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""last-answer - read only the answer body from another pane: no pi TUI footer,
+"""herdr-last-answer - read only the answer body from another pane: no pi TUI footer,
 no pane-width truncation.
 
 Usage:
-    last-answer <pane|name> [--n N] [--tools]
+    herdr-last-answer <pane|name> [--n N] [--tools]
 
 - Source: `herdr agent get <target>` -> `agent_session.value` (must be
   kind=path) -> parse the session jsonl and print the last N **assistant
@@ -42,7 +42,7 @@ EXIT_NO_ANSWER = 3
 
 
 def die(msg, target, code=EXIT_FETCH):
-    print("last-answer: %s" % msg, file=sys.stderr)
+    print("herdr-last-answer: %s" % msg, file=sys.stderr)
     print("  fallback: herdr agent read %s --source recent-unwrapped (screen / stuck / errors)" % target,
           file=sys.stderr)
     sys.exit(code)
@@ -154,7 +154,7 @@ def render(answers, show_tools):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="last-answer", add_help=True,
+    ap = argparse.ArgumentParser(prog="herdr-last-answer", add_help=True,
                                  description="Read only the answer body from another pane (no TUI footer, no width truncation)")
     ap.add_argument("target", nargs="?", help="pane id or agent name")
     ap.add_argument("--n", type=int, default=1, help="print the last N answers (default 1)")

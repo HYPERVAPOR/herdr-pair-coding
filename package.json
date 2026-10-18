@@ -25,9 +25,12 @@
       "./extensions/tools.ts",
       "./extensions/copy-code.ts",
       "./extensions/deepseek-search.ts",
-      "./last-answer/last_answer.ts",
+      "./herdr-last-answer/last_answer.ts",
       "./herdr-watchdog/hb_block.ts",
       "./refs-reclaim/reclaim.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   }
 }
