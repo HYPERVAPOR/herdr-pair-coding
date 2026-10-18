@@ -55,6 +55,12 @@ skill. The tools stay explicit: the profiles mount `last_answer`/`hb_block`, and
 `refs-reclaim/reclaim.ts` is mounted only where cleanup is wanted. A bare `pi`
 gets no tools from this package.
 
+Updates: pi checks packages at startup and prints `Package Updates Available`;
+run `pi update --extensions` (plain `pi update` updates pi itself). That
+reconciles the clone, so the skill, the guard, the tool files and the CLI links
+all move together, and the profile symlinks above follow. Running agents keep
+old code until restarted or `/reload`.
+
 `herdr integration install pi` writes `~/.pi/agent/extensions/herdr-agent-state.ts`;
 herdr owns that file, do not edit it.
 
@@ -90,12 +96,18 @@ agents, run the watchdog. The next two sections are the pi integration.
 
 ## 4. Profiles (pi only)
 
-Copy the two role files and their rule examples into place:
+Link the two role files and their rule examples into place:
 
 ```bash
 mkdir -p ~/.pi/agent/profiles
-cp "$P"/examples/profiles/*.conf "$P"/examples/profiles/*.md.example ~/.pi/agent/profiles/
+for f in worker reviewer; do
+  ln -sfn "$P/examples/profiles/$f.conf"       ~/.pi/agent/profiles/$f.conf
+  ln -sfn "$P/examples/profiles/$f.md.example" ~/.pi/agent/profiles/$f.md.example
+done
 ```
+
+These are symlinks into the package, so `pi update --extensions` updates the
+profiles too. Replace a link with a copy if you want to customize it.
 
 Each `.conf` sets a `PROFILE` array. The `bin/pi-profile` script sources it and
 starts pi:
