@@ -1,6 +1,6 @@
 ---
 name: herdr-pair-coding
-description: Set up or operate herdr-pair-coding: worker-reviewer pair coding on top of herdr. 
+description: "Set up or operate herdr-pair-coding: worker-reviewer pair coding on top of herdr."
 ---
 
 # herdr-pair-coding setup
