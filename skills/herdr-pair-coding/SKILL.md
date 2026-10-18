@@ -1,57 +1,80 @@
 ---
 name: herdr-pair-coding
-description: Install and operate herdr-pair-coding, a worker-reviewer pair-coding setup for pi + herdr (watchdog, last_answer tool, worktree cleanup). Use when the user wants two agents to work as worker and reviewer under herdr, or asks to set up herdr-pair-coding.
+description: Set up or operate herdr-pair-coding: worker-reviewer pair coding on top of herdr. The CLI tools run standalone; pi is optional and adds tool wrappers, role profiles and an inline watchdog status. Use when the user wants two agents to work as worker and reviewer under herdr, or asks to set up herdr-pair-coding.
 ---
 
 # herdr-pair-coding setup
 
-Goal: the user ends with two panes, `worker` and `reviewer`, running pi with the
-right tools, plus a watchdog that nudges the pair when it stalls.
+Goal: two panes, `worker` and `reviewer`, each running an agent, plus a
+watchdog that nudges the pair when it stalls.
 
-Work through the steps in order. Check before you install; ask before you write
-to the user's dotfiles or start a background service.
+The three tools are plain CLIs and only need herdr. pi is optional: it turns
+the CLIs into model-facing tools and adds role profiles. Do the required steps
+first; add the pi part only if the user uses pi.
+
+Work through the steps in order. Ask before you install, write to the user's
+dotfiles, or start a background service.
 
 ## 1. Preflight
 
+Required:
+
 ```bash
-node --version        # 22.19 or newer
-python3 --version
-git --version
 herdr --version
-pi --version
+python3 --version
+git --version        # only for refs-reclaim
+```
+
+Optional, only if the user wants the pi integration:
+
+```bash
+pi --version         # pi ships its own Node, 22.19 or newer
 ```
 
 Report what is missing. Do not install anything until the user agrees.
 
-## 2. Install pi and herdr
+## 2. Install and wire herdr
 
 ```bash
-curl -fsSL https://pi.dev/install.sh | sh
 curl -fsSL https://herdr.dev/install.sh | sh
-herdr integration install pi
+herdr integration install pi     # or claude, codex, ... ; `herdr integration` lists them
 ```
 
-`herdr integration install pi` writes `~/.pi/agent/extensions/herdr-agent-state.ts`.
-herdr owns that file; do not edit it.
-
-The user still needs to log in to a model provider inside pi (`/login`). Ask
-them to do it; you cannot.
+The integration writes the agent's own state hook; herdr owns that file, do not
+edit it.
 
 herdr has to be running (`herdr`) and the agents have to live in its panes.
-Outside herdr, `HERDR_ENV` is not `1` and the pair-coding tools have nothing to
-talk to.
+Outside herdr, `HERDR_ENV` is not `1` and the tools have nothing to talk to.
 
-## 3. Install the bundle
+## 3. Get the tools
+
+With pi:
 
 ```bash
 pi install git:github.com/HYPERVAPOR/herdr-pair-coding
-PKG="$HOME/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding"
+P="$HOME/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding"
 ```
 
-That installs the code. It does not mount every tool: profiles decide which
-tools each role sees.
+Without pi:
 
-## 4. Profiles
+```bash
+git clone https://github.com/HYPERVAPOR/herdr-pair-coding "$HOME/herdr-pair-coding"
+P="$HOME/herdr-pair-coding"
+```
+
+Put the CLIs on `PATH` either way:
+
+```bash
+mkdir -p ~/.local/bin
+ln -sfn "$P/herdr-watchdog/herdr-watchdog"       ~/.local/bin/herdr-watchdog
+ln -sfn "$P/herdr-last-answer/herdr-last-answer" ~/.local/bin/herdr-last-answer
+ln -sfn "$P/refs-reclaim/refs-reclaim"           ~/.local/bin/refs-reclaim
+```
+
+At this point the workflow already works without pi: label the panes, start the
+agents, run the watchdog. The next two sections are the pi integration.
+
+## 4. Profiles (pi only)
 
 Create `~/.pi/agent/profiles/worker.conf` and `reviewer.conf` (copies live in
 the bundle under `examples/profiles/`). Each file sets a `PROFILE` array; a
@@ -75,16 +98,23 @@ pi-profile() {
 The worker gets `read,write,edit,ls,bash`. The reviewer additionally gets
 `last_answer` and `hb_block`, and mounts their two extension files.
 
-Label the panes so the watchdog can find the pair:
+If the user does not use pi, skip this section and tell the agents what to
+call: `herdr-last-answer <worker>` for the answer text, and
+`herdr-watchdog set --action block --reason "..."` to silence the watchdog.
+
+## 5. Label the panes
+
+The watchdog finds pairs by label, not by layout:
 
 ```bash
 herdr pane rename <worker_pane_id> worker
 herdr pane rename <reviewer_pane_id> reviewer
 ```
 
-The labels only need to contain the words `worker` and `reviewer`.
+The labels only need to contain the words `worker` and `reviewer`, so
+`api-worker` / `api-reviewer` also match.
 
-## 5. Watchdog
+## 6. Watchdog
 
 ```bash
 herdr-watchdog daemon
@@ -99,8 +129,8 @@ After=default.target
 
 [Service]
 Type=simple
-Environment=PATH=%h/.local/bin:%h/.pi/agent/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 %h/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding/herdr-watchdog/herdr-watchdog daemon
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 %h/.local/bin/herdr-watchdog daemon
 Restart=on-failure
 RestartSec=15
 
@@ -117,20 +147,25 @@ herdr-watchdog top        # read-only live view
 The daemon only reads pane state and sends messages. `~/.herdr/watchdog/PAUSE`
 pauses it.
 
-## 6. Verify
+## 7. Verify
 
-1. Start the worker pane with `pi-profile worker`, the reviewer with
+CLI checks (no pi needed):
+
+1. `herdr-last-answer <worker>` prints the worker's last answer text.
+2. `herdr-watchdog run --dry-run` finds one pair and prints what it would do.
+3. Stop typing in both panes for ten minutes (or lower the threshold for a
+   test). The watchdog nudges the pair.
+
+pi checks, if step 4 was done:
+
+4. Start the worker with `pi-profile worker`, the reviewer with
    `pi-profile reviewer`.
-2. In the reviewer, run `/tools`. It should list `last_answer` and `hb_block`
+5. In the reviewer, run `/tools`. It should list `last_answer` and `hb_block`
    with `✓`.
-3. Ask the reviewer to read the worker's last answer. It must use the
+6. Ask the reviewer to read the worker's last answer. It must use the
    `last_answer` tool, never `herdr agent herdr-last-answer`.
-4. Run `herdr-watchdog run --dry-run` for one silent pass; it should find one
-   pair and print what it would do.
-5. Stop typing in both panes for ten minutes (or lower the threshold for a
-   test). The watchdog should nudge the pair.
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 - `last_answer` says "not a herdr subcommand": the model tried shell instead of
   the tool. Put the tool in `--tools` and tell it to call `last_answer`.
@@ -148,5 +183,6 @@ pauses it.
 
 - Never run `refs-reclaim apply` without explicit confirmation. It deletes
   worktrees and branches; `apply` needs `confirm=true` and `--yes`.
-- Do not edit `herdr-agent-state.ts`; herdr overwrites it.
+- Do not edit the agent-state hook that `herdr integration install` wrote;
+  herdr overwrites it.
 - Read an extension before installing a package that contains it.
