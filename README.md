@@ -1,232 +1,51 @@
 # herdr-pair-coding
 
-A **worker–reviewer pair-coding** setup on top of
-[herdr](https://herdr.dev). The core is three CLI tools; [pi](https://pi.dev)
-gets the richest integration, but the tools work from any agent.
+Worker–reviewer pair coding on top of [herdr](https://herdr.dev): one agent
+writes, another reviews, each in its own pane.
 
-Two agents work the same task in two panes: the **worker** writes, the
-**reviewer** reads and pushes back. This bundle is the glue that makes that
-pair behave like a team instead of two chat windows: a watchdog that notices
-silence, a way for the reviewer to read the worker's answer, and a cleanup path
-for the worktrees the pair leaves behind.
-
-Every piece here exists for that loop. The small everyday tools — `/tools`,
-`/copy-code`, `/keepctx`, `web_search` — live in a separate package,
-[`pi-utils`](https://github.com/HYPERVAPOR/pi-utils), because they have nothing
-to do with pair coding.
+The core is three CLI tools. [pi](https://pi.dev) adds thin tool wrappers,
+per-role tool allowlists, and an inline watchdog status (`hb_block:true 😴`);
+the tools also work from any agent that can run shell commands.
 
 ## Set up with your agent
-
-Copy this line into pi, Claude Code, Codex, or any agent that can read a URL and
-run shell commands:
 
 ```text
 Help me set up herdr-pair-coding: https://raw.githubusercontent.com/HYPERVAPOR/herdr-pair-coding/main/skills/herdr-pair-coding/SKILL.md
 ```
 
-The target is a skill: it explains the model, checks what is already installed,
-and walks through pi, herdr, the bundle, the profiles and the watchdog. Read it
-yourself first if you prefer.
-
-## The loop
-
-```text
-worker pane                          reviewer pane
-  writes code  ───────────────────▶   reads the answer      herdr-last-answer
-       ▲                                    │
-       │                                    ▼
-       └──────── nudge / interrupt ────  watchdog             herdr-watchdog
-                                            │
-                           each side works in its own worktree
-                                            │
-                           finished worktrees are archived
-                           and removed                       refs-reclaim
-```
-
-- `herdr-last-answer` gives the reviewer the worker's plain answer text, with no
-  TUI footer and no pane-width re-wrapping.
-- `herdr-watchdog` checks every 20 s whether the pair is still moving, and
-  nudges or interrupts the right pane when it is not. `hb_block` lets the
-  reviewer say "we are talking to a human, don't nudge us".
-- `refs-reclaim` is the cleanup step. Parallel agents leave worktrees and
-  branches everywhere; this proves a ref is safe to delete before deleting it.
-- `examples/profiles/` holds a worker and a reviewer profile. Each mounts only
-  the tools that role needs.
-
-## Requirements
-
-- [herdr](https://herdr.dev) — all three tools read panes or flags through it
-- `python3`
-- `git` for `refs-reclaim`; `glab` optional (merge-request state)
-- pi and Node 22.19+ only if you want the tool wrappers, the profiles and the
-  inline status (optional)
-
-## Manual setup
-
-Prefer to do it yourself:
-
-```bash
-# 1. pi + herdr
-curl -fsSL https://pi.dev/install.sh | sh
-curl -fsSL https://herdr.dev/install.sh | sh
-herdr integration install pi    # writes ~/.pi/agent/extensions/herdr-agent-state.ts
-
-# 2. this bundle
-pi install git:github.com/HYPERVAPOR/herdr-pair-coding
-
-# 3. profiles: copy the examples, then edit paths and rule files
-mkdir -p ~/.pi/agent/profiles
-cp examples/profiles/*.conf ~/.pi/agent/profiles/
-```
-
-Start the watchdog in a pane, or as a systemd user service:
-
-```bash
-herdr-watchdog daemon
-```
+The skill is the long version: install, profiles, pane labels, watchdog,
+verification, troubleshooting.
 
 ## What's inside
 
-| Extension | Surface | Context cost | Requires |
-|---|---|---|---|
-| [`herdr-last-answer`](herdr-last-answer/README.md) | `last_answer` tool | tool schema | herdr, Python 3 |
-| [`herdr-watchdog`](herdr-watchdog/README.md) | `hb_block` tool + watchdog daemon | tool schema + background process | herdr, Python 3 |
-| [`refs-reclaim`](refs-reclaim/README.md) | `refs_reclaim` tool, `/reclaim`, CLI | tool schema | git, Python 3 |
+| Tool | Role |
+|---|---|
+| [`herdr-watchdog`](herdr-watchdog/README.md) | 20 s heartbeat; nudges or interrupts a stalled worker/reviewer pair; `hb_block` silences it |
+| [`herdr-last-answer`](herdr-last-answer/README.md) | reviewer reads the worker's answer text, no TUI footer, no width truncation |
+| [`refs-reclaim`](refs-reclaim/README.md) | archives and removes worktrees/branches only after proving them safe |
 
-### herdr-last-answer
-
-Reads the plain answer text from another herdr pane, without the TUI footer and
-without pane-width truncation. Thin shell over the `herdr-last-answer` script;
-the script is the only implementation. The tool name stays `last_answer` so the
-model-facing contract is stable.
-
-### herdr-watchdog
-
-A heartbeat watchdog for paired agents in herdr. Every 20 seconds it checks
-whether a `worker`/`reviewer` pair has gone quiet, and if so nudges or
-interrupts the right pane. Agents can declare "don't disturb us" through the
-`hb_block` tool while running long tasks.
-
-### refs-reclaim
-
-A fail-closed pipeline for reclaiming git worktrees, local branches and remote
-branches: `plan` (read-only classification) → `archive` (bundle + verify +
-copy non-git files + sha256 manifest) → `apply` (re-check, then delete). A ref
-is only removed if its tip is already contained in `origin/dev` or has been
-archived and verified. Remote deletions use an expected-sha lease.
-
-## Works without pi
-
-The three tools are plain CLIs; the pi extensions are thin adapters around
-them.
-
-```bash
-herdr-last-answer <pane|name> [--n N] [--tools]
-herdr-watchdog daemon
-herdr-watchdog set --action block --reason "waiting on a human"
-refs-reclaim plan --repo <dir>
+```text
+worker writes ──▶ reviewer reads ──▶ watchdog nudges ──▶ refs-reclaim cleans up
 ```
 
-Any agent that can run shell commands can use these. What pi adds:
-
-- each CLI becomes a model-facing tool, so the model calls `last_answer`
-  instead of assembling a shell line (the old failure was
-  `herdr agent herdr-last-answer`);
-- `--tools` allowlists keep `hb_block` and `refs_reclaim` visible only to the
-  role that needs them;
-- `hb_block` renders its state inline in the pi status bar
-  (`hb_block:true 😴` / `hb_block:false 👂`), so the reviewer sees whether the
-  watchdog is silenced without opening a file.
-
-## pi integration: mounting the tools
-
-If you use pi, three extensions register model-facing tools. Installing the bundle does not
-mount them; load the ones you need. A git package is cloned to
-`~/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding`, so `-e` points there.
-
-One-line install (the whole bundle):
+## Install
 
 ```bash
 pi install git:github.com/HYPERVAPOR/herdr-pair-coding
 ```
 
-Then mount a tool where you need it, either in a profile or in a one-off run:
+Needs [herdr](https://herdr.dev), `python3`, and `git` for `refs-reclaim`.
+pi is optional: `herdr-last-answer <pane>`, `herdr-watchdog daemon` and
+`refs-reclaim plan --repo <dir>` run as plain CLIs. Only mounted tools cost
+context; anything you do not load adds nothing.
 
-```bash
-PKG=~/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding
+Everyday tools (`/tools`, `/copy-code`, `/keepctx`, `web_search`) are in
+[`pi-utils`](https://github.com/HYPERVAPOR/pi-utils).
 
-# herdr-last-answer: needs herdr + python3
-pi -e "$PKG/herdr-last-answer/last_answer.ts" \
-   --tools read,write,edit,ls,bash,last_answer
+## Safety
 
-# herdr-watchdog: needs herdr + python3; also run the daemon (see its README)
-pi -e "$PKG/herdr-watchdog/hb_block.ts" \
-   --tools read,write,edit,ls,bash,hb_block
-
-# refs-reclaim: needs git + python3; glab optional
-pi -e "$PKG/refs-reclaim/reclaim.ts" \
-   --tools read,write,edit,ls,bash,refs_reclaim
-```
-
-- In a profile, keep the `-e` and `--tools` lines and drop the leading `pi`.
-- `--tools` is a whitelist: when you pass it, the tool's name must be listed or
-  the model will not see it. Without `--tools`, a loaded tool is active by
-  default.
-- `herdr-watchdog` also needs the daemon for heartbeat messages
-  (`herdr-watchdog daemon`, or the systemd unit in its README). The `hb_block`
-  tool alone only writes the flag.
-
-To load only these three through package filtering instead:
-
-```json
-{
-  "packages": [
-    {
-      "source": "git:github.com/HYPERVAPOR/herdr-pair-coding",
-      "extensions": [
-        "herdr-last-answer/last_answer.ts",
-        "herdr-watchdog/hb_block.ts",
-        "refs-reclaim/reclaim.ts"
-      ]
-    }
-  ]
-}
-```
-
-Profiles that run `-ne` disable package-loaded extensions, so they still need
-explicit `-e` paths.
-
-## Does installing this bloat the context?
-
-No. `pi install git:...` clones the repository, but loading is decided
-separately: only the extensions you list are mounted, and each mounted tool
-adds its schema once. An extension that is not loaded adds nothing.
-
-To load only one, list only that file:
-
-```json
-{
-  "packages": [
-    {
-      "source": "git:github.com/HYPERVAPOR/herdr-pair-coding",
-      "extensions": ["herdr-last-answer/last_answer.ts"]
-    }
-  ]
-}
-```
-
-The unused files are still on disk because pi installs a git package as one
-repository.
-
-## Safety notes
-
-- `refs-reclaim` is read-only until you explicitly run `archive`/`apply`, and
-  `apply` requires both `confirm=true` and `--yes`. Anything it cannot prove
-  safe is left alone.
-- `herdr-watchdog` only reads state and sends messages; it does not edit files.
-- Extensions run with your user's permissions. Read the source before
-  installing anything from a package.
-
-## License
+`refs-reclaim` is read-only until `archive`/`apply`; `apply` requires
+`confirm=true` and `--yes` and leaves alone anything it cannot prove safe. The
+watchdog only reads state and sends messages.
 
 MIT
