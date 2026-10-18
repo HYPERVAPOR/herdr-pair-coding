@@ -133,6 +133,9 @@ herdr pane rename <reviewer_pane_id> reviewer
 The labels only need to contain the words `worker` and `reviewer`, so
 `api-worker` / `api-reviewer` also match.
 
+A pane that was already running when the package was installed or updated keeps
+the tool set its session was created with. Restart it, or `/reload` inside it.
+
 ## 6. Watchdog
 
 Start it once herdr is running; it scans live sessions and has nothing to do
@@ -187,6 +190,9 @@ CLI checks:
   answered. End the turn; do not run `herdr agent wait` or retry in a loop. The
   watchdog sends the wake-up message.
 - `/tools` does not show a tool: it is not mounted, or `--tools` excluded it.
+- `[Extensions]` lists an extension but its tools are missing: the session was
+  created (or resumed) before the extension existed, and pi keeps that session's
+  active tool set. `/reload` re-registers and adds them.
 - Watchdog finds no pair: the pane labels must contain `worker` and `reviewer`.
 - Watchdog cannot find `herdr` under systemd: add `~/.local/bin` to the unit's
   `PATH`.
