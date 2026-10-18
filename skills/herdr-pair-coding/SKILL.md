@@ -100,8 +100,9 @@ call: `herdr-last-answer <worker>` for the answer text, and
 
 This is where a running session starts. Starting `herdr` itself needs an
 interactive terminal; your shell tool has no TTY, so ask the user to run
-`herdr` and start the two pi panes. Once the server is up, `herdr pane ...`
-control commands work without a TTY.
+`herdr` and start the two pi panes. Run it in a plain terminal, not inside
+another herdr pane. Once the server is up, `herdr pane ...` control commands
+work without a TTY.
 
 The watchdog finds pairs by label, not by layout:
 
