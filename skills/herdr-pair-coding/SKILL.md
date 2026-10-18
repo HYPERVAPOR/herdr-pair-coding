@@ -69,7 +69,8 @@ ln -sfn "$P/herdr-last-answer/herdr-last-answer" ~/.local/bin/herdr-last-answer
 ln -sfn "$P/refs-reclaim/refs-reclaim"           ~/.local/bin/refs-reclaim
 
 # Debian does not put ~/.local/bin on PATH. Make it stick for later shells.
-printf '%s\n' 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"' >> ~/.bashrc
+grep -q 'pi/agent/bin' ~/.bashrc 2>/dev/null || \
+  printf '%s\n' 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"' >> ~/.bashrc
 
 for c in herdr-watchdog herdr-last-answer refs-reclaim; do
   command -v "$c" || echo "MISSING: $c"
