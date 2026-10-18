@@ -8,11 +8,24 @@
 #   pi-profile worker     -> refused unless the pane is labeled worker
 set -euo pipefail
 
+label_profile() {   # exact label -> profile from labels.conf, if present
+  local label=$1 f="$HOME/.pi/agent/profiles/labels.conf" k v
+  [ -r "$f" ] || return 0
+  while IFS='=' read -r k v; do
+    k=${k//[[:space:]]/}
+    v=${v//[[:space:]]/}
+    [ -z "$k" ] || [ "${k:0:1}" = "#" ] && continue
+    if [ "$k" = "$label" ]; then printf '%s\n' "$v"; return 0; fi
+  done < "$f"
+}
+
 role_from_label() {
   [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] || return 0
-  local json label
+  local json label mapped
   json=$(herdr pane get "$HERDR_PANE_ID" 2>/dev/null) || return 0
   label=$(printf '%s' "$json" | sed -n 's/.*"label" *: *"\([^"]*\)".*/\1/p' | head -1)
+  mapped=$(label_profile "$label")
+  [ -n "$mapped" ] && { printf '%s\n' "$mapped"; return 0; }
   case "$label" in
     *worker*reviewer* | *reviewer*worker*) return 0 ;;   # ambiguous: no guess
     *reviewer*) printf 'reviewer\n' ;;

@@ -49,6 +49,15 @@ label "worker-reviewer"
 inside >/dev/null 2>&1
 check "ambiguous label exits 2" "2" "$?"
 
+# labels.conf: exact label -> arbitrary profile name (what a host with custom
+# profiles uses, e.g. tiiny-worker). It wins over the worker/reviewer guess.
+printf '# comment\n\napi = my-worker\n' > "$T/home/.pi/agent/profiles/labels.conf"
+printf 'PROFILE=(--picked-custom)\n' > "$T/home/.pi/agent/profiles/my-worker.conf"
+label api
+check "labels.conf maps a custom label to a profile" "pi -ne -ns -np --no-mcp --picked-custom" "$(inside)"
+inside worker >/dev/null 2>&1
+check "a role that disagrees with the mapped label is refused" "2" "$?"
+
 check "outside herdr an explicit role still works" "pi -ne -ns -np --no-mcp --picked-worker" "$(outside worker)"
 outside >/dev/null 2>&1
 check "outside herdr with no role exits 2" "2" "$?"

@@ -164,6 +164,10 @@ Rename first, then start each agent with `pi-profile` (no argument). A bare `pi`
 in a labeled pane, or a profile started before the label was set, shows a role
 warning until it is restarted.
 
+For custom profile names, add exact mappings to
+`~/.pi/agent/profiles/labels.conf`, one `label = profile` per line (for example
+`worker = my-worker`). `pi-profile` uses those before guessing worker/reviewer.
+
 A pane that was already running when the package was installed or updated keeps
 the tool set its session was created with. Restart it, or `/reload` inside it.
 
