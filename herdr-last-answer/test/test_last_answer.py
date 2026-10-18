@@ -186,8 +186,8 @@ def main():
     # ---- 5. No assistant text -> non-zero exit + fallback on stderr.
     p5 = run("ok", session_path=silent, fake_herdr=fake_herdr)
     check("5. non-zero exit when there is no answer", p5.returncode != 0, "exit=%d" % p5.returncode)
-    check("5. stderr explains why", "has no assistant text" in p5.stderr, p5.stderr[:200])
-    check("5. stderr gives the agent read fallback", "herdr agent read" in p5.stderr and "recent-unwrapped" in p5.stderr)
+    check("5. stderr explains why", "has no answer yet" in p5.stderr, p5.stderr[:200])
+    check("5. no fallback line for a not-spoken answer", "herdr agent read" not in p5.stderr)
     check("5. not a silent success (stdout is empty)", p5.stdout.strip() == "")
 
     # ---- 6. Cannot get a path: herdr error / kind is not path / file does not exist.
@@ -208,7 +208,7 @@ def main():
     check("6. missing file says it has not spoken", "has not spoken" in p6c.stderr, p6c.stderr[:200])
     check("6. missing file does not leak the raw errno", "Errno" not in p6c.stderr and "cannot read session file" not in p6c.stderr,
           p6c.stderr[:200])
-    check("6. missing file gives the fallback on stderr", "herdr agent read" in p6c.stderr)
+    check("6. no fallback line for a missing session file", "herdr agent read" not in p6c.stderr)
 
     # ---- 7. Bad arguments.
     p7 = run("ok", "--n", "0", session_path=ok_session, fake_herdr=fake_herdr)

@@ -13,9 +13,10 @@ Usage:
 - `--tools`: print **one extra line** after the body - a summary of the tools
   called in the last answer's turn (tool name + first 60 chars of the first
   argument, max 10). **Never print the full toolResult.**
-- Missing path / kind is not path / file does not exist yet / no assistant text
-  in the file -> clear error on stderr + non-zero exit, with the fallback:
-  `herdr agent read <target> --source recent-unwrapped`.
+- Missing path / kind is not path -> error on stderr + non-zero exit, with the
+  fallback `herdr agent read <target> --source recent-unwrapped`.
+- File does not exist yet / no assistant text -> one line on stderr, exit 3, no
+  fallback: the other side has simply not spoken yet. Not a failure.
 
 Diagnostics such as "what is on screen / is it stuck / are there errors" still
 belong to `herdr agent read`, not this command.
@@ -43,8 +44,9 @@ EXIT_NO_ANSWER = 3
 
 def die(msg, target, code=EXIT_FETCH):
     print("herdr-last-answer: %s" % msg, file=sys.stderr)
-    print("  fallback: herdr agent read %s --source recent-unwrapped (screen / stuck / errors)" % target,
-          file=sys.stderr)
+    if code != EXIT_NO_ANSWER:
+        print("  fallback: herdr agent read %s --source recent-unwrapped (screen / stuck / errors)" % target,
+              file=sys.stderr)
     sys.exit(code)
 
 
@@ -174,11 +176,11 @@ def main():
             # assistant text in the file". Both are exit 3 so the tool shell can
             # say "it has not spoken, wait for delivery" instead of handing a raw
             # errno to the model (pi would render that as a failure).
-            die("session file not persisted yet: %s has not spoken (new session / just restarted); pi creates it after the first message (%s)"
-                % (args.target, path), args.target, EXIT_NO_ANSWER)
+            die("%s has not spoken yet (session file not created); pi creates it after the first message"
+                % args.target, args.target, EXIT_NO_ANSWER)
         die("cannot read session file %s: %s" % (path, err), args.target)
     if not answers:
-        die("session file %s has no assistant text (has it answered yet?)" % path, args.target, EXIT_NO_ANSWER)
+        die("%s has no answer yet (session file has no assistant text)" % args.target, args.target, EXIT_NO_ANSWER)
 
     print(render(list(answers), args.tools))
 
