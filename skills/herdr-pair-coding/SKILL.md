@@ -31,12 +31,9 @@ herdr integration install pi     # or claude, codex, ... ; `herdr integration` l
 The integration writes the agent's own state hook; herdr owns that file, do not
 edit it.
 
-herdr has to be running (`herdr`) and the agents have to live in its panes.
-Outside herdr, `HERDR_ENV` is not `1` and the tools have nothing to talk to.
-
-Starting `herdr` itself needs an interactive terminal. Your shell tool has no
-TTY, so ask the user to run `herdr` and start the pi panes. Once the server is
-up, `herdr pane ...` control commands work without a TTY.
+Setup does not need herdr running. The pair loop does: it reads panes and sends
+keys, so `herdr` must be running and both agents must live in its panes. Outside
+herdr, `HERDR_ENV` is not `1` and the tools have nothing to talk to.
 
 ## 3. Get the tools
 
@@ -101,6 +98,11 @@ call: `herdr-last-answer <worker>` for the answer text, and
 
 ## 5. Label the panes
 
+This is where a running session starts. Starting `herdr` itself needs an
+interactive terminal; your shell tool has no TTY, so ask the user to run
+`herdr` and start the two pi panes. Once the server is up, `herdr pane ...`
+control commands work without a TTY.
+
 The watchdog finds pairs by label, not by layout:
 
 ```bash
@@ -112,6 +114,9 @@ The labels only need to contain the words `worker` and `reviewer`, so
 `api-worker` / `api-reviewer` also match.
 
 ## 6. Watchdog
+
+Start it once herdr is running; it scans live sessions and has nothing to do
+before that.
 
 ```bash
 herdr-watchdog daemon
