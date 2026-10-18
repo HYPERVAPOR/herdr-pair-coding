@@ -78,10 +78,14 @@ Each `.conf` sets a `PROFILE` array; a small shell function runs it:
 pi-profile() {
   local f="$HOME/.pi/agent/profiles/$1.conf"
   [ -r "$f" ] || { echo "no such profile: $f" >&2; return 1; }
-  source "$f"
+  . "$f"
   command pi -ne -ns -np --no-mcp $PROFILE "${@:2}"
 }
 ```
+
+This is a shell function, not an installed command. Define it in the shell that
+starts pi, or add it to `~/.bashrc`. `.` works in bash and POSIX sh; `source`
+does not work in dash.
 
 - `-ne` no discovered extensions, `-ns` no skills, `-np` no prompt templates,
   `--no-mcp` no MCP servers: the profile mounts exactly what it lists.
