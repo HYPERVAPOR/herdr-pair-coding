@@ -34,6 +34,10 @@ edit it.
 herdr has to be running (`herdr`) and the agents have to live in its panes.
 Outside herdr, `HERDR_ENV` is not `1` and the tools have nothing to talk to.
 
+Starting `herdr` itself needs an interactive terminal. Your shell tool has no
+TTY, so ask the user to run `herdr` and start the pi panes. Once the server is
+up, `herdr pane ...` control commands work without a TTY.
+
 ## 3. Get the tools
 
 With pi:
