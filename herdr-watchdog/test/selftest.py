@@ -711,5 +711,12 @@ for k, v in old_env.items():
     else:
         os.environ[k] = v
 
+snap = json.load(open(snap_p))
+snap["pid"] = os.getpid()
+json.dump(snap, open(snap_p, "w"))
+rows, all_text, animating, left = render()
+check("E19 live pid: header shows pid, not 'daemon gone'",
+      ("pid %d" % os.getpid()) in rows[0], rows.get(0))
+
 print("\n================ %s ================" % ("all passed" if not fails else "failed: %s" % fails))
 sys.exit(1 if fails else 0)
