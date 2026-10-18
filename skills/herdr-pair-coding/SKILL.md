@@ -85,8 +85,8 @@ pi-profile() {
 - `-ne` no discovered extensions, `-ns` no skills, `-np` no prompt templates,
   `--no-mcp` no MCP servers: the profile mounts exactly what it lists.
 - `--tools` is a whitelist. A tool missing there is invisible to the model.
-- `--append-system-prompt` points at the user's own rule files. Create them, or
-  remove those lines.
+- `--append-system-prompt` takes a path or literal text. A missing file is
+  appended as the literal path, not an error, so check that each path exists.
 
 The worker gets `read,write,edit,ls,bash`. The reviewer additionally gets
 `last_answer` and `hb_block`, and mounts their two extension files.
