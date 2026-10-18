@@ -16,9 +16,12 @@ checkout instead, set `HERDR_PAIR` to its path.
 Run one with the repo's `bin/pi-profile` script (symlink it into `~/.local/bin`):
 
 ```bash
-pi-profile worker
-pi-profile reviewer
+pi-profile            # inside a pane labeled worker or reviewer
+pi-profile worker     # outside herdr, or in an unlabeled pane
 ```
+
+Inside herdr the pane label decides: `pi-profile` with no argument starts the
+matching profile and refuses a role that disagrees with the label.
 
 Panes must be labelled so the watchdog can pair them:
 

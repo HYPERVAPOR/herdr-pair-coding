@@ -1,11 +1,45 @@
 #!/usr/bin/env bash
 # Run pi with a profile from ~/.pi/agent/profiles/<name>.conf.
 # The conf sets a bash array: PROFILE=( -e ... --tools ... ).
+#
+# Inside a herdr pane the role comes from the pane label, so the profile and
+# the label (which the watchdog and last_answer use) cannot disagree:
+#   pi-profile            -> worker or reviewer, from the label
+#   pi-profile worker     -> refused unless the pane is labeled worker
 set -euo pipefail
 
-name=${1:-}
-[ -n "$name" ] || { echo "usage: pi-profile <profile> [pi args...]" >&2; exit 2; }
-shift
+role_from_label() {
+  [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] || return 0
+  local json label
+  json=$(herdr pane get "$HERDR_PANE_ID" 2>/dev/null) || return 0
+  label=$(printf '%s' "$json" | sed -n 's/.*"label" *: *"\([^"]*\)".*/\1/p' | head -1)
+  case "$label" in
+    *worker*reviewer* | *reviewer*worker*) return 0 ;;   # ambiguous: no guess
+    *reviewer*) printf 'reviewer\n' ;;
+    *worker*)   printf 'worker\n' ;;
+  esac
+}
+
+pane_role=$(role_from_label)
+name=""
+if [ -n "${1:-}" ] && [ "${1#-}" = "$1" ]; then   # a bare word is the role; -flags go to pi
+  name=$1
+  shift
+fi
+[ -n "$name" ] || name=$pane_role
+
+if [ -z "$name" ]; then
+  echo "usage: pi-profile [worker|reviewer] [pi args...]" >&2
+  echo "inside a labeled herdr pane, run it with no argument: the role comes from the label." >&2
+  exit 2
+fi
+
+if [ -n "$pane_role" ] && [ "$name" != "$pane_role" ]; then
+  echo "pi-profile: this pane is labeled '$pane_role'; refusing to start the '$name' profile." >&2
+  echo "start it with: pi-profile    (no argument), or rename the pane first." >&2
+  exit 2
+fi
+
 f="$HOME/.pi/agent/profiles/$name.conf"
 [ -r "$f" ] || {
   echo "pi-profile: no such profile: $f" >&2

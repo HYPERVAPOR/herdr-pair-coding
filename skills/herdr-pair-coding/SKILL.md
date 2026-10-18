@@ -97,8 +97,14 @@ starts pi:
 
 ```bash
 ln -sfn "$P/bin/pi-profile" ~/.local/bin/pi-profile
-pi-profile worker
+pi-profile            # inside a labeled pane: worker or reviewer, from the label
+pi-profile worker     # outside herdr, or in a pane without a label
 ```
+
+Inside herdr the pane label is the role. With no argument `pi-profile` starts the
+matching profile; an explicit role that disagrees with the label is refused. The
+`role-guard` extension repeats the check at session start and warns in the
+footer when a pane runs bare pi or the wrong profile.
 
 `~/.local/bin` must be on `PATH`; the CLI links in step 3 use the same directory.
 
@@ -132,6 +138,10 @@ herdr pane rename <reviewer_pane_id> reviewer
 
 The labels only need to contain the words `worker` and `reviewer`, so
 `api-worker` / `api-reviewer` also match.
+
+Rename first, then start each agent with `pi-profile` (no argument). A bare `pi`
+in a labeled pane, or a profile started before the label was set, shows a role
+warning until it is restarted.
 
 A pane that was already running when the package was installed or updated keeps
 the tool set its session was created with. Restart it, or `/reload` inside it.
@@ -193,6 +203,9 @@ CLI checks:
 - `[Extensions]` lists an extension but its tools are missing: the session was
   created (or resumed) before the extension existed, and pi keeps that session's
   active tool set. `/reload` re-registers and adds them.
+- Footer shows `⚠ <role> in <other> pane` or a role notification: the pane label
+  and the loaded profile disagree. Restart with `pi-profile` (no argument), or
+  rename the pane.
 - Watchdog finds no pair: the pane labels must contain `worker` and `reviewer`.
 - Watchdog cannot find `herdr` under systemd: add `~/.local/bin` to the unit's
   `PATH`.
