@@ -21,16 +21,15 @@ python3 --version
 git --version        # only for refs-reclaim
 ```
 
-## 2. Install and wire herdr
+## 2. Install herdr
 
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh
 export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"   # Debian does not add these
-herdr integration install pi     # or claude, codex, ... ; `herdr integration` lists them
 ```
 
-The integration writes the agent's own state hook; herdr owns that file, do not
-edit it.
+Do not run `herdr integration install <agent>` yet: it needs that agent's config
+directory, so it runs after the agent itself is installed (step 3).
 
 Setup does not need herdr running. The pair loop does: it reads panes and sends
 keys, so `herdr` must be running and both agents must live in its panes. Outside
@@ -43,9 +42,13 @@ With pi:
 ```bash
 curl -fsSL https://pi.dev/install.sh | sh   # skip if pi is already installed
 export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"
+herdr integration install pi
 pi install git:github.com/HYPERVAPOR/herdr-pair-coding
 P="$HOME/.pi/agent/git/github.com/HYPERVAPOR/herdr-pair-coding"
 ```
+
+`herdr integration install pi` writes `~/.pi/agent/extensions/herdr-agent-state.ts`;
+herdr owns that file, do not edit it.
 
 Without pi:
 
@@ -53,6 +56,9 @@ Without pi:
 git clone https://github.com/HYPERVAPOR/herdr-pair-coding "$HOME/herdr-pair-coding"
 P="$HOME/herdr-pair-coding"
 ```
+
+If that agent has a herdr integration, run `herdr integration install <agent>`
+after installing it (`herdr integration` lists the kinds).
 
 Put the CLIs on `PATH` either way:
 
