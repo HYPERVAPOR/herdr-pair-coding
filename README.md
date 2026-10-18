@@ -9,18 +9,10 @@ pair behave like a team instead of two chat windows: a watchdog that notices
 silence, a way for the reviewer to read the worker's answer, and a cleanup path
 for the worktrees the pair leaves behind.
 
-These extensions are not a grab bag. They exist because two agents in two panes
-need things a single agent does not.
-
-## Two layers
-
-| Layer | Purpose | Pieces |
-|---|---|---|
-| Pair-coding | run two agents as worker + reviewer | `herdr-watchdog`, `herdr-last-answer`, `refs-reclaim`, example profiles |
-| Daily driver | make one pi session nicer | `tools`, `copy-code`, `keepctx` |
-
-The daily-driver tools work without herdr. The pair-coding layer does not: it
-reads panes, sends keystrokes and finds worktrees through herdr.
+Every piece here exists for that loop. The small everyday tools — `/tools`,
+`/copy-code`, `/keepctx`, `web_search` — live in a separate package,
+[`pi-utils`](https://github.com/HYPERVAPOR/pi-utils), because they have nothing
+to do with pair coding.
 
 ## The loop
 
@@ -91,39 +83,9 @@ herdr-watchdog daemon
 
 | Extension | Surface | Context cost | Requires |
 |---|---|---|---|
-| [`keepctx`](extensions/keepctx.ts) | `/keepctx` | 0 | pi |
-| [`tools`](extensions/tools.ts) | `/tools` | 0 | pi |
-| [`copy-code`](copy-code/README.md) | `/copy-code`, `alt+c` | 0 | pi |
-| [`deepseek-search`](extensions/deepseek-search.ts) | `web_search` tool | tool schema | DeepSeek API key |
 | [`herdr-last-answer`](herdr-last-answer/README.md) | `last_answer` tool | tool schema | herdr, Python 3 |
 | [`herdr-watchdog`](herdr-watchdog/README.md) | `hb_block` tool + watchdog daemon | tool schema + background process | herdr, Python 3 |
 | [`refs-reclaim`](refs-reclaim/README.md) | `refs_reclaim` tool, `/reclaim`, CLI | tool schema | git, Python 3 |
-
-### keepctx
-
-Compacts the conversation with a fixed brevity instruction: keep background,
-current state, facts, goals and this pane's role; drop the reasoning in
-between. Keeps long sessions from drifting.
-
-### tools
-
-`/tools` lists which tools are currently declared to the model (`✓`) and which
-are registered but not active (`·`), including where each one came from. pi has
-no built-in equivalent. Useful when a tool you expected is missing.
-
-### copy-code
-
-Copies the raw source of any earlier assistant code block to the clipboard.
-This matters because the TUI wraps rendered lines to the pane width, so
-mouse-selection gives you re-wrapped text with broken indentation. Blocks get
-stable, increasing IDs; `/copy-code` opens a fuzzy picker (a plain number
-matches an ID exactly).
-
-### deepseek-search
-
-A single `web_search` tool backed by the DeepSeek Search API, auth from pi's
-credential store. Replaces multi-tool web packages that keep several schemas
-resident.
 
 ### herdr-last-answer
 
@@ -149,7 +111,7 @@ archived and verified. Remote deletions use an expected-sha lease.
 
 ## Enabling the tool extensions
 
-Four extensions register model-facing tools. Installing the bundle does not
+Three extensions register model-facing tools. Installing the bundle does not
 mount them; load the ones you need. A git package is cloned to
 `~/.pi/agent/git/github.com/HYPERVAPOR/pi-dev-bundle`, so `-e` points there.
 
@@ -163,9 +125,6 @@ Then mount a tool where you need it, either in a profile or in a one-off run:
 
 ```bash
 PKG=~/.pi/agent/git/github.com/HYPERVAPOR/pi-dev-bundle
-
-# deepseek-search: needs a DeepSeek key (/login deepseek)
-pi -e "$PKG/extensions/deepseek-search.ts"
 
 # herdr-last-answer: needs herdr + python3
 pi -e "$PKG/herdr-last-answer/last_answer.ts" \
@@ -188,7 +147,7 @@ pi -e "$PKG/refs-reclaim/reclaim.ts" \
   (`herdr-watchdog daemon`, or the systemd unit in its README). The `hb_block`
   tool alone only writes the flag.
 
-To load only these four through package filtering instead:
+To load only these three through package filtering instead:
 
 ```json
 {
@@ -196,7 +155,6 @@ To load only these four through package filtering instead:
     {
       "source": "git:github.com/HYPERVAPOR/pi-dev-bundle",
       "extensions": [
-        "extensions/deepseek-search.ts",
         "herdr-last-answer/last_answer.ts",
         "herdr-watchdog/hb_block.ts",
         "refs-reclaim/reclaim.ts"
@@ -211,15 +169,9 @@ explicit `-e` paths.
 
 ## Does installing this bloat the context?
 
-No. `pi install git:...` clones the repository (about 350 KB on disk), but
-loading is decided separately:
-
-- Command-only extensions (`keepctx`, `tools`, `copy-code`) register **no
-  tools**, so they add **0 tokens** to every request.
-- Tool extensions (`deepseek-search`, `last_answer`, `hb_block`,
-  `refs_reclaim`) add a tool schema, and only when they are loaded.
-- Anything you do not list under `extensions` is never loaded: no tool, no
-  command, no context cost.
+No. `pi install git:...` clones the repository, but loading is decided
+separately: only the extensions you list are mounted, and each mounted tool
+adds its schema once. An extension that is not loaded adds nothing.
 
 To load only one, list only that file:
 
@@ -228,15 +180,14 @@ To load only one, list only that file:
   "packages": [
     {
       "source": "git:github.com/HYPERVAPOR/pi-dev-bundle",
-      "extensions": ["extensions/copy-code.ts"]
+      "extensions": ["herdr-last-answer/last_answer.ts"]
     }
   ]
 }
 ```
 
 The unused files are still on disk because pi installs a git package as one
-repository. If you also want them off disk, the bundle would need to be split
-into one package per extension; that is not the case today.
+repository.
 
 ## Safety notes
 
