@@ -36,8 +36,9 @@ function runCli(args, timeout) {
   try {
     return execFileSync(CLI, args, { encoding: "utf8", timeout, maxBuffer: 64 * 1024 * 1024 });
   } catch (e) {
+    // First line only: pi echoes the last tool result in a one-line strip.
     const msg = `${e.stdout || ""}${e.stderr || ""}`.trim() || e.message;
-    throw new Error(msg);
+    throw new Error(msg.split("\n")[0].trim());
   }
 }
 
@@ -89,15 +90,15 @@ const refsReclaim = {
       for (const b of params.extra_base || []) args.push("--extra-base", b);
       return { content: [{ type: "text", text: runCli(args, 300000).trim() }], details: undefined };
     }
-    if (!params.plan) throw new Error("archive/apply requires plan (a plan-*.json path)");
+    if (!params.plan) throw new Error("refs_reclaim: archive/apply needs plan (a plan-*.json path) — run action=plan first");
     if (params.action === "archive") {
       args = ["archive", ...base, "--plan", params.plan, "--yes"];
       return { content: [{ type: "text", text: runCli(args, 900000).trim() }], details: undefined };
     }
     if (params.confirm !== true) {
-      throw new Error("apply requires confirm=true (show the T1/T2 list to a human and get approval first)");
+      throw new Error("refs_reclaim: apply needs confirm=true after a human approves the T1/T2 list (see refs-reclaim/README.md)");
     }
-    if (!params.archive_manifest) throw new Error("apply requires archive_manifest (an archive-*.json path)");
+    if (!params.archive_manifest) throw new Error("refs_reclaim: apply needs archive_manifest (an archive-*.json path) — run action=archive first");
     args = ["apply", ...base, "--plan", params.plan,
       "--archive-manifest", params.archive_manifest, "--yes"];
     for (const o of params.only || []) args.push("--only", o);

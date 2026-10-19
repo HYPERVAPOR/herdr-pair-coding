@@ -41,7 +41,7 @@ function resolveCli() {
       /* ignore: try the next candidate */
     }
   }
-  throw new Error(`herdr-last-answer script not found; tried: ${cands.join(", ")}`);
+  throw new Error("last_answer: herdr-last-answer not found — link it into ~/.local/bin or beside the extension");
 }
 
 const lastAnswer = {
@@ -84,7 +84,9 @@ const lastAnswer = {
           details: undefined,
         };
       }
-      throw new Error(detail || e.message);
+      // One line on purpose: pi echoes the last tool result in a one-line strip
+      // under the transcript, and a multi-line message overflows it.
+      throw new Error(`${String(detail || e.message).split("\n")[0].trim()} — check the target with herdr pane list`);
     }
   },
 };
