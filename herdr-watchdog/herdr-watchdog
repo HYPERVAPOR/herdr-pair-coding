@@ -10,7 +10,7 @@ Subcommands:
   herdr-watchdog set --action block|unblock --reason "long task"  # write the flag (called by hb_block)
   herdr-watchdog show [--session S --tab T]                      # for humans: current value + recent changes
   herdr-watchdog get  [--session S --tab T]                      # print true/false (reviewer footer reads it)
-  herdr-watchdog top  [--refresh 1]                              # read-only view: heartbeat / who was called
+  herdr-watchdog top  [--refresh 1] [--demo]                    # read-only view: vitals / pairs / who was called
   herdr-watchdog run [--dry-run] [--all-sessions] [--tab T]       # judge one pass (--dry-run prints only)
   herdr-watchdog daemon [--interval 20]                           # daemon: scan all running herdr sessions
 
@@ -23,10 +23,12 @@ overrides the directory (tests).
 import argparse
 import fcntl
 import json
+import math
 import os
 import subprocess
 import sys
 import time
+import unicodedata
 
 HB_DIR = os.environ.get("HB_DIR") or os.path.expanduser("~/.herdr/watchdog")
 REASON_MAX = 120         # longer reasons are truncated with "…", not rejected (rejecting would leave the pair unmuted)
@@ -605,6 +607,13 @@ def cmd_daemon(args):
 
 
 # ------------------------------------------------------------------ top (read-only view, README §5)
+#
+# The view is a vital-signs monitor, not a table: the daemon's pass is a heartbeat.
+# A scrolling braille ECG anchors one QRS per pass at ts+took, so the spike lands
+# exactly when a pass lands; the pair tree hangs off the trunk below it. A call
+# becomes a signal that runs down the trunk and along the branch into the pane.
+# Per pair a staleness gauge shows how close a working pair is to the 10-minute
+# threshold. Everything is time-based, so frames never depend on earlier frames.
 
 def snapshot_path():
     return os.path.join(HB_DIR, "last-pass.json")
@@ -623,12 +632,85 @@ def read_snapshot():
     return read_json(snapshot_path())
 
 
-BUS_X = 1          # column of the trunk (the heartbeat on row 0 also lives here)
-LEAF_X = 8         # every pane name starts at this column (keep branches aligned)
-NAME_MAX = 18      # truncate long tab names so a line does not overflow
-TRUNK_S = 0.5      # time for the signal to travel down the trunk
-BRANCH_S = 0.3     # time to travel along the branch to the pane
-FLASH_S = 1.4      # feedback pulse after the pane receives it
+TOP_DEMO = False          # `top --demo`: synthetic frames, nothing is read or written
+
+
+def demo_snapshot(now):
+    """Synthetic pairs for `top --demo`: one working, one called, one muted, one idle."""
+    every = 10.0
+    phase = now % every
+
+    def pane(pid, role, status, age):
+        return {"id": pid, "role": role, "status": status, "age": age, "note": None}
+
+    def pair(tab, name, panes=(), flag=False, since=None, reason=None,
+             action=None, target=None, why=None):
+        return {"session": "demo", "tab": tab, "tab_name": name, "panes": list(panes),
+                "lines": [], "flag": flag, "flag_since": since, "flag_reason": reason,
+                "action": action, "target": target, "why": why}
+
+    called = True                       # the demo pass always calls the stalled pair
+    pairs = [
+        pair("demo:t1", "in-progress",
+             [pane("demo:p1", "reviewer", "idle", 190.0),
+              pane("demo:p2", "worker", "working", 20.0 + phase * 4)]),
+        pair("demo:t2", "验收 · dev→preprod",
+             [pane("demo:p3", "reviewer", "working", 980.0 + phase),
+              pane("demo:p4", "worker", "idle", 3000.0)],
+             action="interrupt" if called else None,
+             target="demo:p3" if called else None,
+             why="reviewer-stuck" if called else None),
+        pair("demo:t3", "design review", flag=True, since="2026-01-02T13:01:00",
+             reason="waiting for a human decision"),
+    ]
+    return {"at": "demo", "ts": now - phase, "took": 0.03, "pid": os.getpid(),
+            "interval": every, "paused": False, "sessions": ["demo"], "pairs": pairs}
+
+
+TRUNK_X = 1        # the spine below the vitals
+FLOW_X = 2         # branch particles run from here, the arm starts here
+LEAF_X = 9         # every pane name starts at this column (keep branches aligned)
+NAME_MAX = 22      # truncate long tab names so a line does not overflow
+GAUGE_W = 9        # staleness gauge cells (0 .. STALE_SEC)
+TRUNK_S = 0.55     # time for the signal to travel down the trunk
+BRANCH_S = 0.35    # time to travel along the branch to the pane
+FLASH_S = 1.50     # feedback pulse after the pane received it
+RING_S = 1.20      # shockwave after the flash
+FLOW_PERIOD = 3.2  # branch particle period (a working pair flows faster)
+ECG_H = 3          # rows of braille ECG (12 pixels)
+
+
+def dwidth(s):
+    """Terminal cells a string occupies (CJK/emoji are 2, combining marks 0)."""
+    n = 0
+    for ch in str(s):
+        if unicodedata.combining(ch):
+            continue
+        n += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return n
+
+
+def dtrim(s, width):
+    """Cut to `width` cells, adding an ellipsis when something was cut."""
+    s = str(s)
+    if width <= 0:
+        return ""
+    if dwidth(s) <= width:
+        return s
+    out, used = "", 0
+    for ch in s:
+        cw = 0 if unicodedata.combining(ch) else (2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1)
+        if used + cw > width - 1:
+            break
+        out += ch
+        used += cw
+    return out + "…"
+
+
+def dpad(s, width):
+    """ljust for terminals: pad by display cells, not by len()."""
+    s = dtrim(s, width)
+    return s + " " * max(0, width - dwidth(s))
 
 
 def top_put(scr, y, x, text, attr=0):
@@ -642,30 +724,19 @@ def top_put(scr, y, x, text, attr=0):
         pass
 
 
-def top_bar(done, total, width):
-    """Progress bar text (drawn by the view, not by curses lines)"""
-    total = max(total, 1)
-    filled = max(0, min(width, int(round(width * done / float(total)))))
-    return "█" * filled + "░" * (width - filled)
+def top_text(scr, y, x, text, attr=0):
+    """top_put + return the next column (display-width aware)."""
+    top_put(scr, y, x, text, attr)
+    return x + dwidth(text)
 
 
-def top_pane(pn):
-    """One pane as a short segment: wE:pV reviewer idle 6s (or why it cannot be judged)"""
-    who = "%s %s %s" % (pn.get("id"), pn.get("role"), pn.get("status") or "?")
-    if pn.get("note"):
-        return "%s (%s)" % (who, str(pn["note"]).split("->")[0].strip())
-    return "%s %s" % (who, fmt_age(pn.get("age")))
-
-
-def top_call(pr):
-    """What happened this pass: A2 -> wE:pV / esc+A1 -> wE:pV / skip"""
-    act = {"interrupt": "esc+%s → %s", "prompt": "%s → %s"}.get(pr.get("action"))
-    return act % (LABELS.get(pr.get("why"), "?"), pr.get("target")) if act else "skip"
-
-
-def top_face(pr):
-    """The pair's face: 📣 just called / 😴 blocked / 👂 listening"""
-    return "📣" if pr.get("action") else ("😴" if pr.get("flag") else "👂")
+def top_bar_parts(done, total, width):
+    """Pass clock -> (filled, head+rail); the two halves get different colours."""
+    width = max(3, int(width))
+    total = max(float(total), 1e-6)
+    ratio = max(0.0, min(1.0, float(done) / total))
+    head = int(ratio * (width - 1))
+    return "━" * head, "╸" + "─" * max(0, width - head - 1)
 
 
 def top_hb(pr):
@@ -675,124 +746,598 @@ def top_hb(pr):
     return "hb:%s%s" % ("true" if on else "false", " " + since if on and since else "")
 
 
-def top_cols(pairs):
-    """Column widths: name / (tab) / hb - measure then ljust (README §5)"""
-    w_name = max([min(len(str(pr.get("tab_name") or "?")), NAME_MAX) for pr in pairs] or [1])
-    w_tab = max([len(str(pr.get("tab"))) + 2 for pr in pairs] or [1])
-    w_hb = max([len(top_hb(pr)) for pr in pairs] or [1])
+def top_face(pr):
+    """The pair's mark (monochrome, so it takes the palette's colour):
+    ↯ interrupted / ➤ called / ‖ muted / ◌ listening."""
+    if pr.get("action") == "interrupt":
+        return "↯"
+    if pr.get("action"):
+        return "➤"
+    return "‖" if pr.get("flag") else "◌"
+
+
+def top_call(pr):
+    """What happened this pass: A2 → wE:pV / esc+A1 → wE:pV / — (nothing)"""
+    act = {"interrupt": "esc+%s → %s", "prompt": "%s → %s"}.get(pr.get("action"))
+    return act % (LABELS.get(pr.get("why"), "?"), pr.get("target")) if act else "—"
+
+
+def top_working(pr):
+    return any(p.get("status") == "working" for p in (pr.get("panes") or []))
+
+
+def top_vitals(pr):
+    """-> (kind, age). The freshest working pane sets the risk, exactly like the judge's shortcut."""
+    if pr.get("flag"):
+        return "blocked", None
+    ages = [p.get("age") for p in (pr.get("panes") or [])
+            if p.get("status") == "working" and p.get("age") is not None]
+    if not ages:
+        return "quiet", None
+    return "work", min(ages)
+
+
+def top_cols(pairs, sessions):
+    """Column widths measured in display cells: name / (session:tab) / hb."""
+    multi = len(sessions or []) > 1
+    w_name = max([min(dwidth(pr.get("tab_name") or "?"), NAME_MAX) for pr in pairs] or [1])
+    w_tab = max([dwidth("(%s%s)" % (("%s/" % pr.get("session")) if multi else "", pr.get("tab")))
+                 for pr in pairs] or [1])
+    w_hb = max([dwidth(top_hb(pr)) for pr in pairs] or [1])
     return w_name, w_tab, w_hb
 
 
-def top_leaf(pr, cols, sessions):
-    """The leaf row: face + tab name + (tab) + hb value + what happened, aligned in four columns"""
+def top_gauge(scr, y, x, pr, now, attrs):
+    """Staleness gauge: how close a working pair is to the 10-minute threshold. -> (x, label, key)"""
+    kind, age = top_vitals(pr)
+    if kind == "blocked":
+        key, label, filled = "flag_on", "muted", GAUGE_W
+    elif kind == "quiet":
+        key, label, filled = "gauge_bg", "idle", 0
+    else:
+        ratio = max(0.0, min(1.0, age / float(STALE_SEC)))
+        filled = int(round(ratio * GAUGE_W))
+        key = "gauge_ok" if ratio < 0.55 else ("gauge_warn" if ratio < 0.9 else "gauge_bad")
+        label = "%s/10m" % fmt_age(age)
+    head = filled - 1
+    for i in range(GAUGE_W):
+        k = key if i < filled else "gauge_bg"
+        if i == head and kind == "work" and int(now * 4) % 2 == 0:
+            k = key + "_hi"
+        top_put(scr, y, x + i, "▰" if i < filled else "▱", attrs.get(k, attrs.get(key, 0)))
+    return x + GAUGE_W, label, key
+
+
+def top_leaf(scr, y, pr, cols, sessions, now, attrs, hot=False):
+    """One leaf row: face + tab name + (tab) + hb value + staleness gauge + what happened."""
+    h, w = scr.getmaxyx()
     w_name, w_tab, w_hb = cols
-    name = str(pr.get("tab_name") or "?")
-    if len(name) > NAME_MAX:
-        name = name[:NAME_MAX - 1] + "…"
+    limit = w - 2
+    act, flag = pr.get("action"), bool(pr.get("flag"))
+    key = "call" if act else ("flag_on" if flag else "dim")
+    x = LEAF_X
+    face = top_face(pr)
+    face_key = "flash" if hot else key
+    if flag and not act and int(now * 0.8) % 2 == 0:
+        face_key = "flag_breath"
+    top_put(scr, y, x, face, attrs.get(face_key, attrs.get(key, 0)))
+    x += dwidth(face) + 2
+
+    name = dpad(pr.get("tab_name") or "?", w_name)
+    top_put(scr, y, x, name, attrs.get("call" if act else "name", 0))
+    x += w_name + 1
+
     sess = "%s/" % pr.get("session") if len(sessions or []) > 1 else ""
-    return "%s %s %s %s %s" % (top_face(pr), name.ljust(w_name),
-                               ("(%s%s)" % (sess, pr.get("tab"))).ljust(w_tab),
-                               top_hb(pr).ljust(w_hb), top_call(pr))
+    tab = dpad("(%s%s)" % (sess, pr.get("tab")), w_tab)
+    if x + dwidth(tab) < limit:
+        top_put(scr, y, x, tab, attrs.get("dim", 0))
+    x += w_tab + 1
+
+    hb = dpad(top_hb(pr), w_hb)
+    if x + dwidth(hb) < limit:
+        top_put(scr, y, x, hb, attrs.get("flag_on" if flag else "dim", 0))
+    x += w_hb + 1
+
+    if x + GAUGE_W + 9 < limit:
+        x, label, gkey = top_gauge(scr, y, x, pr, now, attrs)
+        top_put(scr, y, x + 1, dpad(label, 8), attrs.get(gkey, 0))
+        x += 9
+
+    action = top_call(pr)
+    if x + dwidth(action) < limit:
+        top_put(scr, y, x, action, attrs.get("call" if act else "dim", 0))
+        x += dwidth(action)
+    if flag and pr.get("flag_reason"):           # why the pair is muted, on the leaf
+        room = limit - x - 2 - dwidth("‖ ")
+        if room >= 3:
+            top_text(scr, y, x + 2, "‖ " + dtrim(pr["flag_reason"], room),
+                     attrs.get("flag_on", 0))
+    return x
+
+
+def top_pane_row(scr, y, pr, now, attrs):
+    """The facts under a leaf: one segment per pane, colour = state, dot = pulse."""
+    h, w = scr.getmaxyx()
+    limit = w - 2
+    x = LEAF_X
+    panes = pr.get("panes") or []
+    for i, pn in enumerate(panes):
+        if x + 14 >= limit:
+            top_put(scr, y, x, "…", attrs.get("dim", 0))
+            return
+        st, age = pn.get("status") or "?", pn.get("age")
+        if pn.get("note"):
+            key = "dim"
+            seg = "%s %s %s" % (pn.get("id"), pn.get("role"), st)
+            seg += " (%s)" % dtrim(str(pn["note"]).split("->")[0].strip(), 18)
+        elif st == "working" and age is not None and age >= STALE_SEC:
+            key, age_s = ("stale" if int(now * 2) % 2 else "stale_dim"), fmt_age(age)
+            seg = "%s %s %s %s" % (pn.get("id"), pn.get("role"), st, age_s)
+        elif st == "working":
+            key, age_s = ("work_hi" if int(now * 3) % 2 else "work"), fmt_age(age)
+            seg = "%s %s %s %s" % (pn.get("id"), pn.get("role"), st, age_s)
+        else:
+            key, age_s = "dim", fmt_age(age)
+            seg = "%s %s %s %s" % (pn.get("id"), pn.get("role"), st, age_s)
+        dot = "●" if st == "working" else "○"
+        if x + dwidth(dot + " " + seg) >= limit:
+            top_put(scr, y, x, "…", attrs.get("dim", 0))
+            return
+        top_put(scr, y, x, dot, attrs.get(key, 0))
+        x = top_text(scr, y, x + 2, seg, attrs.get(key, 0))
+        if i < len(panes) - 1:
+            x = top_text(scr, y, x, "  ·  ", attrs.get("trunk", 0))
+
+
+
+def top_chips(scr, y, w, chips, attrs, reserve=12):
+    """Right-aligned status chips; low-priority ones are dropped, the title is never covered."""
+    x = w - 2
+    for text, key in reversed(chips):
+        width = dwidth(text)
+        if x - width < reserve:
+            break
+        top_put(scr, y, x - width, text, attrs.get(key, 0))
+        x -= width
+        if x - 3 >= reserve:
+            top_put(scr, y, x - 3, " · ", attrs.get("dim", 0))
+            x -= 3
+
+
+def top_header(scr, w, snap, pairs, alive, paused, live, now, attrs):
+    """Heart + shimmering name + status chips (daemon / interval / pairs / quit)."""
+    h = scr.getmaxyx()[0]
+    if h < 1:
+        return
+    phase = now % 1.0
+    hit = live and (phase < 0.16 or 0.30 < phase < 0.44)
+    top_put(scr, 0, 1, "♥" if hit else "♡", attrs.get("heart_hit" if hit else "heart", 0))
+    word = "WATCHDOG"
+    head = int(now * 7) % (len(word) + 12) - 6
+    x = 3
+    for i, ch in enumerate(word):
+        key = "title_glow" if abs(i - head) <= 1 else "title"
+        top_put(scr, 0, x, ch, attrs.get(key, 0))
+        x += 1
+    subtitle = "· synthetic data — not your panes" if TOP_DEMO else "· pair telemetry"
+    sub_end = 0
+    if w >= (66 if TOP_DEMO else 46):
+        sub_end = x + 1 + dwidth(subtitle)
+        top_text(scr, 0, x + 1, subtitle, attrs.get("call" if TOP_DEMO else "dim", 0))
+
+    # low priority to the left, high priority to the right (the last one survives longest)
+    sec = (snap or {}).get("sessions") or []
+    chips = [("%d pair%s" % (len(pairs), "" if len(pairs) == 1 else "s"), "dim")]
+    if len(sec) > 1:
+        chips.append(("%d sessions" % len(sec), "dim"))
+    chips.append(("%gs/pass" % float((snap or {}).get("interval") or INTERVAL), "dim"))
+    if TOP_DEMO:
+        chips.append(("DEMO", "call"))
+    elif snap is None:
+        chips.append(("no snapshot", "dim"))
+    elif paused:
+        chips.append(("paused", "paused"))
+    elif alive:
+        chips.append(("pid %s" % snap.get("pid"), "ready"))
+    else:
+        chips.append(("daemon gone", "dead"))
+    chips.append(("? help", "title_glow"))
+    chips.append(("q quit", "dim"))
+    reserve = 30 if w >= 46 else max(12, min(30, (w * 2) // 5))
+    if sub_end:
+        reserve = max(reserve, sub_end + 1)
+    top_chips(scr, 0, w, chips, attrs, reserve)
+
+
+BRAILLE_BITS = ((0x01, 0x02, 0x04, 0x40), (0x08, 0x10, 0x20, 0x80))
+
+
+class Braille:
+    """Tiny pixel canvas: 2x4 dots per cell, so curves are smooth without half-blocks."""
+
+    def __init__(self):
+        self.cells = {}          # (row, col) -> (bits, heat)
+
+    def dot(self, px, py, heat=0):
+        col, row = px // 2, py // 4
+        bits, h = self.cells.get((row, col), (0, 0))
+        self.cells[(row, col)] = (bits | BRAILLE_BITS[px % 2][py % 4], max(h, heat))
+
+    def line(self, x0, y0, x1, y1, heat=0):
+        """Bresenham: connect the samples so the trace never breaks between pixels."""
+        dx, dy = abs(x1 - x0), -abs(y1 - y0)
+        sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
+        err = dx + dy
+        while True:
+            self.dot(x0, y0, heat)
+            if x0 == x1 and y0 == y1:
+                break
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x0 += sx
+            if e2 <= dx:
+                err += dx
+                y0 += sy
+
+    def draw(self, scr, x0, y0, colors):
+        for (row, col), (bits, heat) in self.cells.items():
+            top_put(scr, y0 + row, x0 + col, chr(0x2800 + bits),
+                    colors[min(heat, len(colors) - 1)])
+
+
+def ecg_value(u):
+    """One heartbeat in [-0.4, 1.05] over the beat (u = 0..1, fractions of one pass):
+    P wave, QRS complex, T wave. Fractions keep the shape readable at any interval."""
+    def g(center, sigma, amp):
+        return amp * math.exp(-((u - center) / sigma) ** 2)
+    return (g(0.11, 0.018, 0.22) - g(0.265, 0.008, 0.30)
+            + g(0.30, 0.011, 1.05) - g(0.338, 0.012, 0.38)
+            + g(0.55, 0.050, 0.46))
+
+
+def top_ecg(scr, y0, rows, w, now, snap, live, attrs):
+    """Scrolling braille ECG: the daemon's pass is the beat. Flatline when it is gone/paused."""
+    if rows <= 0 or w < 6:
+        return
+    pw, ph = 2 * max(1, w - 2), 4 * rows
+    base = ph - 2
+    interval = max(0.4, float((snap or {}).get("interval") or INTERVAL))
+    took = float((snap or {}).get("took") or 0)
+    beat0 = float((snap or {}).get("ts") or now) + took
+    speed = max(1.0, pw * 0.56 / interval)          # one beat spans ~56% of the screen
+    amp = ph * 0.70
+    cv = Braille()
+    prev = None
+    for px in range(pw):
+        if live:
+            t_at = now - (pw - 1 - px) / speed
+            v = ecg_value(((t_at - beat0) % interval) / interval)
+            dx = pw - 1 - px
+            heat = 3 if dx < 6 else (2 if dx < 20 else (1 if dx < 48 else 0))
+        else:
+            # no heartbeat: a whisper of drift, nothing more
+            v = 0.02 * math.sin(px * 0.7 + now * 0.6) + 0.015 * math.sin(px * 0.21 - now)
+            heat = 0
+        y = max(0, min(ph - 1, int(round(base - v * amp))))
+        if prev is None:
+            cv.dot(px, y, heat)
+        else:
+            cv.line(px - 1, prev, px, y, heat)
+        prev = y
+    cv.draw(scr, 1, y0, [attrs.get("ecg_dim", 0), attrs.get("ecg_lo", 0),
+                         attrs.get("ecg_mid", 0), attrs.get("ecg_hi", 0)])
+
+    if not live:
+        if snap is None:
+            label, key = "AWAITING TELEMETRY", "dim"
+        elif (snap or {}).get("paused"):
+            label, key = "PAUSED", "paused"
+        else:
+            label, key = "NO SIGNAL", "dead"
+        x = max(1, (w - dwidth(label) - 2) // 2)
+        top_put(scr, y0 + rows // 2, x, " " + label + " ", attrs.get(key, 0))
+
+
+def top_footer(scr, y, w, now, snap, left, every, pairs, attrs, legend=True):
+    """Pass clock + counts + legend on one calm line."""
+    if y < 0:
+        return
+    dim = attrs.get("dim", 0)
+    if snap is None:
+        top_put(scr, y, 1, "▸ no snapshot yet — %s is empty until the daemon finishes a pass"
+                % snapshot_path(), dim)
+        return
+
+    ts, took = float(snap.get("ts") or 0), float(snap.get("took") or 0)
+    elapsed, total = now - ts, max(0.4, took + every)
+    barw = max(8, min(30, w - 72))
+    x = top_text(scr, y, 1, "DEMO   " if TOP_DEMO else "", attrs.get("call", 0))
+    x = top_text(scr, y, x, "▸ ", attrs.get("bar_head", 0))
+    if left is not None and left > 0.5:
+        x = top_text(scr, y, x, "next %ds " % int(left + 0.5), attrs.get("bar_head", 0))
+    else:
+        x = top_text(scr, y, x, "passing  ", attrs.get("bar_head", 0))
+    filled, rest = top_bar_parts(elapsed, total, barw)
+    x = top_text(scr, y, x, filled, attrs.get("bar", 0))
+    x = top_text(scr, y, x, rest, attrs.get("bar_dim", dim))
+    x = top_text(scr, y, x, " %ds/%ds " % (int(elapsed), int(total)), dim)
+
+    called = sum(1 for pr in pairs if pr.get("action"))
+    blocked = sum(1 for pr in pairs if pr.get("flag"))
+    listening = max(0, len(pairs) - called - blocked)
+    if x + 24 < w:
+        x = top_text(scr, y, x, "· ", dim)
+        x = top_text(scr, y, x, "➤%d " % called, attrs.get("call", 0) if called else dim)
+        x = top_text(scr, y, x, "‖%d " % blocked, attrs.get("flag_on", 0) if blocked else dim)
+        x = top_text(scr, y, x, "◌%d" % listening, dim)
+
+    hint = "▰ quiet → 10m   ➤ called   ‖ muted   ◌ listening"
+    if legend and x + dwidth(hint) + 4 < w:
+        top_put(scr, y, w - 2 - dwidth(hint), hint, dim)
+
+
+def top_help(scr, attrs):
+    """The `?` page: what the marks and the gauge mean (any key closes)."""
+    h, w = scr.getmaxyx()
+    scr.erase()
+    dim = attrs.get("dim", 0)
+    lines = [
+        ("pair", "one worker + one reviewer tab the watchdog watches"),
+        ("┣ ┗", "one branch per pair; the line under it lists its panes"),
+        ("", ""),
+        ("♥ ♡", "one heartbeat = one daemon pass (the scrolling ECG)"),
+        ("", "flatline / NO SIGNAL = daemon gone or paused"),
+        ("➤", "a call was sent this pass; → shows the target pane"),
+        ("↯", "the reviewer was interrupted (esc), then messaged"),
+        ("‖", "muted by hb_block(block); time/reason on the row"),
+        ("◌", "listening: the pair is alive, nothing was sent"),
+        ("—", "nothing was sent this pass"),
+        ("▰▱", "quiet time of the freshest working pane / 10m"),
+        ("● ○", "pane working / idle; red ● = working, no output 10m"),
+        ("", ""),
+        ("?", "close this help"),
+        ("q esc", "quit"),
+    ]
+    label_w = 7
+    body = max([dwidth(t) for _l, t in lines] or [1])
+    inner = max(24, min(w - 4, body + label_w + 5))
+    x0 = max(1, (w - inner - 2) // 2)
+    y0 = max(0, (h - len(lines) - 2) // 2)
+    top_put(scr, y0, x0, "╭" + "─" * inner + "╮", dim)
+    for i in range(len(lines)):
+        top_put(scr, y0 + 1 + i, x0, "│", dim)
+        top_put(scr, y0 + 1 + i, x0 + inner + 1, "│", dim)
+    top_put(scr, y0 + len(lines) + 1, x0, "╰" + "─" * inner + "╯", dim)
+    title = " herdr-watchdog top · legend "
+    top_put(scr, y0, x0 + max(1, (inner - dwidth(title)) // 2), title,
+            attrs.get("title_glow", 0))
+    for i, (label, text) in enumerate(lines):
+        y = y0 + 1 + i
+        if not label and not text:
+            continue
+        top_put(scr, y, x0 + 2, dpad(label, label_w), attrs.get("call", 0))
+        if text:
+            room = max(1, inner - label_w - 3)
+            top_put(scr, y, x0 + 2 + label_w + 1, dtrim(text, room), attrs.get("name", 0))
 
 
 def top_draw(scr, attrs=None):
-    """One screen: the heartbeat (dog) at the top of the trunk, a branch per pair to its panes;
-    the signal travels down the trunk and along the branch to the pane that was called.
-    Reads the snapshot only; never acts. -> (animating, seconds until next pass)"""
+    """One frame. Reads the snapshot only; never acts. -> (animating, seconds until next pass)"""
     attrs = attrs or {}
     h, w = scr.getmaxyx()
     scr.erase()
-    snap = read_snapshot()
     now = time.time()
+    snap = demo_snapshot(now) if TOP_DEMO else read_snapshot()
     dim = attrs.get("dim", 0)
-    sig = attrs.get("signal", attrs.get("call", 0))
 
-    pid = (snap or {}).get("pid")
-    if not snap:
-        who = "no snapshot yet"
-    elif pid and pid_alive(pid):
-        who = "pid %d" % pid
-    else:
-        who = "daemon gone (pid %s died)" % pid
-    every = (snap or {}).get("interval") or INTERVAL
-    pulse = "♥" if int(now) % 2 == 0 else "♡"      # beats once per second
-    top_put(scr, 0, BUS_X, pulse, attrs.get("beat", 0))
-    top_put(scr, 0, 3, "watchdog v3 · %s · %gs/pass · q quit" % (who, every), attrs.get("head", 0))
-
-    pairs = sorted((snap or {}).get("pairs") or [], key=lambda pr: 0 if pr.get("action") else 1)
-    called = [i for i, pr in enumerate(pairs) if pr.get("action")]
+    # Keep the daemon's order: a call must not make rows jump under the reader's eyes.
+    pairs = list((snap or {}).get("pairs") or [])
     sessions = (snap or {}).get("sessions") or []
+    pid = (snap or {}).get("pid")
+    every = float((snap or {}).get("interval") or INTERVAL)
+    paused = bool((snap or {}).get("paused"))
+    alive = bool(pid) and pid_alive(pid)
     left, age = None, 1e9
     if snap:
-        ts, took = snap.get("ts") or 0, snap.get("took") or 0
-        elapsed, total = now - ts, took + every
-        left = total - elapsed
-        # The signal starts when this pass becomes visible (the snapshot is written after it
-        # finishes, so ts+took is the start point).
+        ts, took = float(snap.get("ts") or 0), float(snap.get("took") or 0)
+        left = (took + every) - (now - ts)
         age = now - (ts + took)
-        bar_w = max(8, min(40, w - 46))
-        tag = " · %d called" % len(called) if called else ""
-        if left > 0.5:
-            beat = "%ds %s next in %ds%s" % (int(elapsed), top_bar(elapsed, total, bar_w), int(left + 0.5), tag)
-        elif left > -(took + 20):
-            beat = "%ds %s running now%s" % (int(elapsed), top_bar(total, total, bar_w), tag)
-        else:
-            beat = "last pass %s ago — daemon gone?" % fmt_age(elapsed)
-        top_put(scr, 1, BUS_X, "┃", dim)
-        top_put(scr, 1, 3, beat, attrs.get("beat", dim))
-    else:
-        top_put(scr, 1, 3, "no snapshot: %s (daemon has not finished a pass yet)" % snapshot_path(), dim)
+    live = bool(snap) and alive and not paused and age < every * 2.5
 
-    n = max(1, len(pairs))
-    cols = top_cols(pairs)
-    animating = bool(called) and 0 <= age <= TRUNK_S + BRANCH_S + FLASH_S
-    y = 2
-    pair_rows = {}
+    top_header(scr, w, snap, pairs, alive, paused, live, now, attrs)
+    rows = ECG_H if h >= 9 else (2 if h >= 6 else 0)
+    if h >= 30:
+        rows = 5
+    elif h >= 24:
+        rows = 4
+    if not (rows and 1 + rows <= h - 2):
+        rows = 0
+    if rows:
+        top_ecg(scr, 1, rows, w, now, snap, live, attrs)
+    cols = top_cols(pairs, sessions)
+    head_h = 1 if pairs and h >= 14 else 0
+    if head_h:
+        w_name, w_tab, w_hb = cols
+        x_name = LEAF_X + 3
+        x_tab = x_name + w_name + 1
+        x_hb = x_tab + w_tab + 1
+        x_gauge = x_hb + w_hb + 1
+        x_act = x_gauge + GAUGE_W + 9
+        top_put(scr, 1 + rows, x_name, "PAIR", dim)
+        top_put(scr, 1 + rows, x_tab, "TAB", dim)
+        top_put(scr, 1 + rows, x_hb, "HB_BLOCK", dim)
+        top_put(scr, 1 + rows, x_gauge, "QUIET/10m", dim)
+        top_put(scr, 1 + rows, x_act, "LAST CALL", dim)
+    y = 1 + rows + head_h
+    foot = h - 1
+
+    # Layout first (leaf + pane facts per pair, a breath between pairs when it fits),
+    # then draw the trunk, then the leaves. Stable: no row ever depends on a timer.
+    row_of, end_of, y0 = {}, {}, y
+    need_all = sum((2 if pr.get("panes") else 1) for pr in pairs)
+    gap = 1 if pairs and need_all + len(pairs) - 1 <= foot - y0 else 0
+    y = y0
     for i, pr in enumerate(pairs):
-        if y > h - 2:
-            top_put(scr, h - 1, BUS_X, "┗━ …(%d more)" % (len(pairs) - i), dim)
+        need = 2 if pr.get("panes") else 1
+        if y + need >= foot:
             break
-        on = bool(pr.get("flag"))
-        top_put(scr, y, BUS_X, "┗" if i == len(pairs) - 1 else "┣", dim)
-        top_put(scr, y, 2, "━" * (LEAF_X - 3), dim)
-        top_put(scr, y, LEAF_X, top_leaf(pr, cols, sessions),
-                attrs.get("call" if pr.get("action") else ("flag_on" if on else "flag_off"), 0))
-        pair_rows[i] = y
-        y += 1
-        if pr.get("panes"):
-            top_put(scr, y, BUS_X, "┃", dim)
-            top_put(scr, y, LEAF_X + 2, " | ".join(top_pane(pn) for pn in pr["panes"]), dim)
+        row_of[i] = y
+        end_of[i] = y + need - 1
+        y += need
+        nxt = pairs[i + 1] if i + 1 < len(pairs) else None
+        if gap and nxt is not None and y + 1 + (2 if nxt.get("panes") else 1) < foot:
             y += 1
+    last = max(end_of.values()) if end_of else y0 - 1
+    more = len(pairs) - len(row_of)
+    more_y = y
+    if row_of:
+        for r in range(y0, last + 1):
+            top_put(scr, r, TRUNK_X, "┃", attrs.get("trunk", dim))
+        # falling sparks in the conduit next to the trunk
+        span = max(1, last - y0 + 1)
+        drift = now * 3.5 if live else 0
+        for k in range(0, span, 4):
+            top_put(scr, y0 + int((k + drift) % span), FLOW_X, "⠂",
+                    attrs.get("flow" if live else "trunk", dim))
+    else:
+        top_put(scr, y0, TRUNK_X, "┗━", attrs.get("trunk", dim))
 
-    # Signal: light the trunk -> run along the branch (●) -> flash at the pane (✦)
-    if animating:
-        last = max(called)
-        front = age / TRUNK_S * n                    # which branch the signal has reached (1-based, continuous)
-        for i in called:
+    called = [i for i, pr in enumerate(pairs) if pr.get("action") and i in row_of]
+    animating = bool(called) and 0 <= age <= TRUNK_S + BRANCH_S + FLASH_S
+    n = max(1, len(pairs))
+
+    for i, pr in enumerate(pairs):
+        if i not in row_of:
+            continue
+        y = row_of[i]
+        top_pair_last = i == len(pairs) - 1 and not more
+        top_put(scr, y, TRUNK_X, "┗" if top_pair_last else "┣", attrs.get("trunk", dim))
+        arm = max(1, LEAF_X - FLOW_X - 1)
+        top_put(scr, y, FLOW_X, "━" * arm, attrs.get("trunk", dim))
+
+        # a particle flowing out to the pane: fast for a working pair, slow otherwise
+        working = top_working(pr)
+        period = FLOW_PERIOD * (1.0 if working else 2.2)
+        slot = max(1, arm - 2)
+        pos = int(((((now if live else 0) + i * 0.9) % period) / period) * slot)
+        top_put(scr, y, FLOW_X + 1 + min(slot - 1, pos), "●",
+                attrs.get(("work" if working else "flow") if live else "trunk", dim))
+
+        hot = False
+        if i in called and 0 <= age <= TRUNK_S + BRANCH_S + FLASH_S:
             t0 = TRUNK_S * (i + 1) / n
-            pr = pairs[i]                             # do not reuse pr from the previous loop
-            yr = pair_rows.get(i)
-            if age < t0 or yr is None:
-                continue
-            for r in range(1, yr + 1):               # light the trunk down to this row
-                top_put(scr, r, BUS_X,
-                        "┗" if (r == yr and i == len(pairs) - 1) else ("┣" if r == yr else "┃"), sig)
-            bp = min(1.0, (age - t0) / BRANCH_S)
-            nx = 2 + int(bp * (LEAF_X - 3))
-            top_put(scr, yr, 2, "━" * max(0, nx - 2), sig)
-            if bp < 1.0:
-                top_put(scr, yr, nx, "●", sig)      # still running along the branch
-            else:
-                top_put(scr, yr, LEAF_X, top_leaf(pr, cols, sessions), sig)
-                blink = int((age - t0 - BRANCH_S) / 0.22) % 2 == 0
-                top_put(scr, yr, LEAF_X - 2, "✦" if blink else " ", sig)   # received; flash
-        if front < last + 1:                         # not at the bottom yet: a dot on the trunk
-            top_put(scr, min(pair_rows.get(last, h - 1), 1 + int(front)), BUS_X, "◆", sig)
+            if age >= t0:
+                # light the trunk down to this leaf
+                for r in range(y0, y + 1):
+                    ch = ("┗" if top_pair_last else "┣") if r == y else "┃"
+                    top_put(scr, r, TRUNK_X, ch, attrs.get("signal", 0))
+                bp = min(1.0, (age - t0) / BRANCH_S)
+                nx = FLOW_X + int(bp * (arm - 1))
+                top_put(scr, y, FLOW_X, "━" * max(0, nx - FLOW_X), attrs.get("signal", 0))
+                if bp < 1.0:
+                    top_put(scr, y, nx, "●", attrs.get("signal", 0))       # comet on the branch
+                else:
+                    hot = True                                            # arrived: flash the leaf
+                    since = age - t0 - BRANCH_S
+                    r = int(since * 20)                                    # shockwave rings
+                    if since < RING_S:
+                        for k in (r + 1, r + 6):
+                            rx = LEAF_X - 2 - k
+                            if FLOW_X <= rx < LEAF_X - 2:
+                                top_put(scr, y, rx, "✧", attrs.get("ring", 0))
+                    top_put(scr, y, LEAF_X - 2,
+                            "✦" if int(since / 0.16) % 2 == 0 else " ", attrs.get("flash", 0))
+
+        top_leaf(scr, y, pr, cols, sessions, now, attrs, hot=hot)
+        if pr.get("panes"):
+            top_put(scr, y + 1, TRUNK_X, "┃", attrs.get("trunk", dim))
+            top_pane_row(scr, y + 1, pr, now, attrs)
+
+    if more:
+        top_put(scr, min(more_y, foot - 1), TRUNK_X, "┗━ …(%d more)" % more, dim)
+
+    legend = ("♥ each pass is one beat   ·   ▰ quiet time → 10m   ·   "
+              "➤ called   ·   ‖ muted   ·   ◌ listening")
+    spare = foot - 1 - last
+    show_legend = not more and spare >= 2 and dwidth(legend) + 4 <= w
+    if show_legend:
+        top_put(scr, foot - 1, max(1, (w - dwidth(legend)) // 2), legend,
+                attrs.get("trunk", dim))
+    elif snap is not None and not pairs:
+        msg = "no worker/reviewer pairs in this pass"
+        top_put(scr, y0 + max(1, (foot - y0) // 2), max(1, (w - dwidth(msg)) // 2), msg, dim)
+    top_footer(scr, foot, w, now, snap, left, every, pairs, attrs, legend=not show_legend)
+
     return animating, left
+
+
+def top_attr_table():
+    """-> attrs dict; a 256-colour palette when the terminal has one, 8 colours otherwise."""
+    import curses
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+    except Exception:
+        pass
+    rich = curses.COLORS >= 256
+
+    # Catppuccin Mocha, mapped to the nearest xterm-256 slot. Low saturation,
+    # no A_DIM on 256-colour terminals: the muted slots already sit near the
+    # background (#1e1e2e), so dimming them again would make the lines disappear.
+    specs = [
+        ("title", 189, curses.COLOR_WHITE, curses.A_BOLD),        # text
+        ("title_glow", 147, curses.COLOR_CYAN, curses.A_BOLD),    # lavender
+        ("name", 189, curses.COLOR_WHITE, 0),                     # text
+        ("dim", 103, curses.COLOR_WHITE, curses.A_DIM),           # overlay1
+        ("heart", 181, curses.COLOR_RED, 0),                      # maroon
+        ("heart_hit", 211, curses.COLOR_RED, curses.A_BOLD),      # red
+        ("ecg_dim", 138, curses.COLOR_RED, curses.A_DIM),         # old trace
+        ("ecg_lo", 181, curses.COLOR_RED, curses.A_DIM),          # maroon
+        ("ecg_mid", 211, curses.COLOR_RED, 0),                    # red
+        ("ecg_hi", 224, curses.COLOR_RED, curses.A_BOLD),         # rosewater
+        ("trunk", 103, curses.COLOR_WHITE, curses.A_DIM),         # overlay1
+        ("flow", 147, curses.COLOR_MAGENTA, 0),                   # lavender
+        ("call", 216, curses.COLOR_YELLOW, curses.A_BOLD),        # peach
+        ("signal", 224, curses.COLOR_YELLOW, curses.A_BOLD),      # rosewater
+        ("flash", 189, curses.COLOR_WHITE, curses.A_REVERSE | curses.A_BOLD),
+        ("ring", 147, curses.COLOR_MAGENTA, curses.A_BOLD),       # lavender
+        ("flag_on", 223, curses.COLOR_YELLOW, 0),                 # yellow
+        ("flag_breath", 180, curses.COLOR_YELLOW, curses.A_DIM),  # gold
+        ("work", 151, curses.COLOR_GREEN, 0),                     # green
+        ("work_hi", 157, curses.COLOR_GREEN, curses.A_BOLD),
+        ("stale", 211, curses.COLOR_RED, curses.A_BOLD),          # red
+        ("stale_dim", 181, curses.COLOR_RED, 0),                  # maroon
+        ("gauge_ok", 151, curses.COLOR_GREEN, 0),
+        ("gauge_ok_hi", 157, curses.COLOR_GREEN, curses.A_BOLD),
+        ("gauge_warn", 223, curses.COLOR_YELLOW, 0),
+        ("gauge_warn_hi", 229, curses.COLOR_YELLOW, curses.A_BOLD),
+        ("gauge_bad", 211, curses.COLOR_RED, 0),
+        ("gauge_bad_hi", 217, curses.COLOR_RED, curses.A_BOLD),
+        ("gauge_bg", 243, curses.COLOR_WHITE, curses.A_DIM),      # overlay0
+        ("bar", 111, curses.COLOR_CYAN, 0),                       # blue
+        ("bar_head", 224, curses.COLOR_YELLOW, curses.A_BOLD),    # rosewater
+        ("bar_dim", 243, curses.COLOR_WHITE, curses.A_DIM),
+        ("ready", 151, curses.COLOR_GREEN, curses.A_BOLD),        # green
+        ("paused", 223, curses.COLOR_YELLOW, curses.A_BOLD),      # yellow
+        ("dead", 211, curses.COLOR_RED, curses.A_BOLD),           # red
+    ]
+    attrs = {}
+    for n, (key, fg, fallback, extra) in enumerate(specs, start=1):
+        try:
+            curses.init_pair(n, fg if rich else fallback, -1)
+            if rich:
+                extra &= ~curses.A_DIM
+            attrs[key] = curses.color_pair(n) | extra
+        except Exception:
+            attrs[key] = extra
+    return attrs
 
 
 def cmd_top(args):
     """Read-only view: attach to see what the daemon is doing. No actions, no messages, no lock."""
+    global TOP_DEMO
+    TOP_DEMO = bool(getattr(args, "demo", False))
     try:
         import curses
     except ImportError:
@@ -804,33 +1349,35 @@ def cmd_top(args):
             curses.curs_set(0)
         except Exception:
             pass
-        scr.timeout(int(args.refresh * 1000))
-        every_seconds = float(INTERVAL)
-        attrs = {}
         try:
-            curses.use_default_colors()
-            curses.start_color()
-            curses.init_pair(1, curses.COLOR_YELLOW, -1)   # blocked (true)
-            curses.init_pair(2, curses.COLOR_GREEN, -1)    # not blocked (false)
-            curses.init_pair(3, curses.COLOR_CYAN, -1)     # header
-            curses.init_pair(4, curses.COLOR_RED, -1)      # heartbeat / signal / who was called
-            attrs = {"head": curses.color_pair(3) | curses.A_BOLD, "dim": curses.A_DIM,
-                     "beat": curses.color_pair(4), "call": curses.color_pair(4),
-                     "signal": curses.color_pair(4) | curses.A_BOLD,
-                     "flag_on": curses.color_pair(1), "flag_off": curses.color_pair(2)}
+            scr.keypad(True)
         except Exception:
             pass
+        attrs = {}
+        try:
+            attrs = top_attr_table()
+        except Exception:
+            pass
+        idle = max(40, int(float(getattr(args, "refresh", 1.0) or 1.0) * 80))
+        show_help = False
         while True:
-            animating, left = top_draw(scr, attrs)
-            every_seconds = (read_snapshot() or {}).get("interval") or INTERVAL
+            if show_help:
+                top_help(scr, attrs)
+            else:
+                animating, left = top_draw(scr, attrs)
             scr.refresh()
-            # 1 fps is enough when idle (the second hand moves every second); animate or
-            # about-to-fire -> 10 fps. Lead time is 15% of the interval (3s at 20s), so a
-            # short interval does not run at 10 fps all the time.
-            soon = left is not None and left < min(5.0, every_seconds * 0.15)
-            scr.timeout(100 if (animating or soon) else int(args.refresh * 1000))
-            if scr.getch() in (ord("q"), ord("Q"), 27):
+            # ~12 fps idle (the ECG scrolls), 25 fps while a call is in flight
+            scr.timeout(-1 if show_help else (40 if animating else idle))
+            ch = scr.getch()
+            if show_help:
+                show_help = False
+                if ch in (ord("q"), ord("Q"), 27):
+                    return
+                continue
+            if ch in (ord("q"), ord("Q"), 27):
                 return
+            if ch == ord("?"):
+                show_help = True
 
     curses.wrapper(loop)
     return 0
@@ -867,8 +1414,10 @@ def main():
     p_get.set_defaults(fn=cmd_get)
 
     p_top = sub.add_parser("top", help="read-only view: heartbeat / who was called (q quits)")
+    p_top.add_argument("--demo", action="store_true",
+                       help="preview the animation with synthetic pairs (reads and writes nothing)")
     p_top.add_argument("--refresh", type=float, default=1.0,
-                       help="redraw interval when idle (default 1; 10 fps while signalling or about to fire)")
+                       help="idle redraw multiplier (default 1 = ~12 fps; 25 fps while a call is in flight)")
     p_top.set_defaults(fn=cmd_top)
 
     p_run = sub.add_parser("run", help="judge one pass (--dry-run prints only)")

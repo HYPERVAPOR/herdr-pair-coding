@@ -48,8 +48,13 @@ The reviewer status bar shows `hb_block:true 😴` or `hb_block:false 👂`.
 
 - State: `~/.herdr/watchdog/`.
 - Restart after changing the script: `systemctl --user restart herdr-watchdog`.
-- `touch PAUSE` pauses; `--dry-run` does one silent pass;
-  `herdr-watchdog top` is a read-only live view.
+- `touch PAUSE` pauses; `--dry-run` does one silent pass.
+- `herdr-watchdog top` is a read-only live view: a scrolling braille ECG (one
+  QRS per daemon pass), the pair tree with quiet-time gauges, and a signal that
+  runs down the trunk into the pane the watchdog just called. `?` opens a
+  legend of the marks and the quiet gauge; `q` quits.
+  `herdr-watchdog top --demo` previews the whole animation with synthetic pairs
+  (reads and writes nothing).
 - Change `hb_block.ts` and `/reload`; no pane restart needed.
 
 ## Test

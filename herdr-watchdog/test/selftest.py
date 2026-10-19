@@ -516,18 +516,18 @@ class StubScreen:
 
 
 def lines_of(scr):
-    """Assemble segments drawn at the same row (later draws overwrite earlier ones, like curses)."""
+    """Assemble segments in draw order; a later segment overwrites only the cells it covers (like curses)."""
     out = {}
-    for y, x, text, _a in sorted(scr.rows, key=lambda r: (r[0], r[1])):
+    for y, x, text, _a in scr.rows:
         line = out.get(y) or ""
         if len(line) < x:
             line += " " * (x - len(line))
-        out[y] = line[:x] + text
+        out[y] = line[:x] + text + line[x + len(text):]
     return out
 
 
 SIG = 99          # test-only: sentinel attr values
-TEST_ATTRS = {"signal": SIG, "call": 98, "dim": 1, "head": 97, "beat": 96}
+TEST_ATTRS = {"signal": SIG, "call": 98, "dim": 1, "head": 97, "beat": 96, "flash": 95, "ring": 94}
 
 
 def render(h=18, w=100, attrs=TEST_ATTRS):
@@ -540,6 +540,7 @@ def render(h=18, w=100, attrs=TEST_ATTRS):
 d = fake_dir(*STUCK_PAIR, tabs=STUCK_TABS)
 run(["run", "--herdr-bin", FAKE], fake_env(d))          # real pass -> snapshot
 hb.HB_DIR = d                                            # the view reads this directory
+hb.TOP_DEMO = False
 before = mutations(d)
 snap_p = os.path.join(hb.HB_DIR, "last-pass.json")
 
@@ -559,34 +560,36 @@ def frame(attrs=TEST_ATTRS, h=18, w=100):
     return scr, lines_of(scr), animating, left
 
 
-snapshot_at(6)                                       # static: the pass is long over, animation done
-rows, all_text, animating, left = render()
-
-
 def lit(scr):
     """Which segments are drawn in the signal color (only while animating)."""
     return [t for _y, _x, t, a in scr.rows if a == SIG]
 
 
+snapshot_at(6)                                       # static: the pass is long over, animation done
+rows, all_text, animating, left = render()
+
 scr0 = StubScreen(18, 100)
 hb.top_draw(scr0, dict(TEST_ATTRS))
 print("-- 18x100 (static: the pass just ended, signal landed) --")
 print("\n".join("%2d| %s" % (y, t) for y, t in sorted(rows.items())))
-check("E1 header: heartbeat + daemon status (pid gone -> say so) + interval + q quit",
+check("E1 header: heartbeat + shimmering title + daemon status + interval + q quit",
       (rows[0].startswith(" ♥") or rows[0].startswith(" ♡"))
-      and "watchdog v3" in rows[0] and "daemon gone" in rows[0] and ("%gs/pass" % hb.INTERVAL) in rows[0]
-      and "q quit" in rows[0], rows.get(0))
-check("E2 second row: second hand + progress bar + seconds to next pass (interval follows INTERVAL)",
-      "6s" in rows[1] and "█" in rows[1] and ("next in %ds" % (hb.INTERVAL - 6)) in rows[1],
-      rows.get(1))
-check("E3 trunk present, one branch from trunk to leaf",
-      rows[1].lstrip().startswith("┃") and "┗━━━━━ 📣" in rows[2], repr(rows.get(2)))
-check("E4 leaf row: tab name + hb value + which pane was called",
-      "📣 in-progress (wE:t1)" in rows[2] and "hb:false" in rows[2]
-      and "A2 → wE:pV" in rows[2], repr(rows.get(2)))
-check("E5 leaf columns aligned (every pane name starts at the same column)",
-      {x for y, x, t, a in scr0.rows if t.startswith(("📣", "😴", "👂"))} == {hb.LEAF_X},
-      str([(y, x, t[:4]) for y, x, t, a in scr0.rows if t[:1] in "📣😴👂"]))
+      and "WATCHDOG" in rows[0] and "daemon gone" in rows[0]
+      and ("%gs/pass" % hb.INTERVAL) in rows[0] and "q quit" in rows[0], rows.get(0))
+check("E2 footer: pass clock (next in N seconds) + elapsed/total + a heavy bar",
+      "next 14s" in rows[17] and "6s/20s" in rows[17] and "━" in rows[17]
+      and ("next %ds" % (hb.INTERVAL - 6)) in rows[17], rows.get(17))
+check("E3 the ECG says NO SIGNAL when the daemon is gone (flatline, no beating heart)",
+      "NO SIGNAL" in all_text and any(c in all_text for c in "⠁⠂⠄⡀⠤⠔⠒") and animating is False,
+      all_text)
+leaf_rows = [t for t in rows.values() if "in-progress" in t]
+check("E4 leaf row: face + tab name + (tab) + hb value + which pane was called",
+      bool(leaf_rows) and "➤" in leaf_rows[0] and "in-progress" in leaf_rows[0]
+      and "(wE:t1)" in leaf_rows[0] and "hb:false" in leaf_rows[0]
+      and "A2 → wE:pV" in leaf_rows[0], str(leaf_rows))
+check("E5 leaf hangs off the trunk (a box-drawing branch + an arm before the face)",
+      any((t.lstrip().startswith("┗") or t.lstrip().startswith("┣")) and "━" in t
+          for t in leaf_rows), str(leaf_rows))
 check("E6 pane facts row (id + role + status + age)",
       any("wE:pV reviewer idle" in t and "wE:p1 worker working" in t for t in rows.values()), all_text)
 check("E7 does not copy judge lines: codes + pane facts say it all",
@@ -594,6 +597,21 @@ check("E7 does not copy judge lines: codes + pane facts say it all",
 check("E8 no log in the view (tail_lines is gone)",
       not hasattr(hb, "tail_lines") and "watchdog.log" not in all_text, all_text)
 check("E9 the view makes no herdr calls (reads the snapshot only)", mutations(d) == before, json.dumps(mutations(d)))
+check("E9b footer counts the calls / mutes / listening pairs",
+      "➤1" in rows[17] and "‖0" in rows[17] and "◌0" in rows[17], rows.get(17))
+
+# Staleness gauge: the working pane was last fresh 23m ago -> a full red gauge.
+leaf_y = [y for y, t in rows.items() if "in-progress" in t][0]
+check("E9c stale working pane: the gauge is full and the age is shown",
+      rows[leaf_y].count("▰") == hb.GAUGE_W and "23m" in rows[leaf_y], rows[leaf_y])
+
+# A live daemon (the test process stands in for it) must draw a beating ECG.
+snapshot_at(6, pid=os.getpid())
+rows, all_text, animating, left = render()
+check("E10 live pid: header shows pid + the vitals show a P-QRS-T trace (braille, no NO SIGNAL)",
+      ("pid %d" % os.getpid()) in rows[0] and "NO SIGNAL" not in all_text
+      and any(any(ch in t for ch in "⠁⠂⠄⡀⠤⠔⠒⠢⠉⣀⣤") for y, t in rows.items() if y in (1, 2, 3)),
+      rows.get(0) + " | " + str([rows.get(y) for y in (1, 2, 3)]))
 
 # Column alignment: three tab names of different lengths; (tab) / hb: / action must align.
 keep = open(snap_p).read()
@@ -607,63 +625,87 @@ json.dump({"at": "x", "ts": time.time() - 6, "took": 0, "pid": os.getpid(), "int
 rows, all_text, animating, left = render()
 print("-- three-column alignment --\n" + "\n".join("%2d|%s" % (y, t) for y, t in sorted(rows.items())))
 leaves = [t for t in rows.values() if "hb:" in t]
-cols = {(t.index("("), t.index("hb:"), t.index("skip")) for t in leaves}
-check("E9b three-column alignment: different tab names, (tab) / hb: / action all start at the same column",
+cols = {(t.index("("), t.index("hb:"), t.index("—")) for t in leaves}
+check("E11 three-column alignment: different tab names, (tab) / hb: / action all start at the same column",
       len(leaves) == 3 and len(cols) == 1, str(sorted(cols)) + " :: " + str(leaves))
-open(snap_p, "w").write(keep)
 
+# CJK / emoji are two cells wide: the next column must still align (measured by x, not len).
+json.dump({"at": "x", "ts": time.time() - 6, "took": 0, "pid": os.getpid(), "interval": hb.INTERVAL,
+           "paused": False, "sessions": ["selftest"],
+           "pairs": [dict(base, tab="wE:t1", tab_name="abc", flag=True, action=None),
+                     dict(base, tab="wE:t2", tab_name="验收 · dev→preprod", flag=True, action=None),
+                     dict(base, tab="wE:t3", tab_name="短", flag=True, action=None)]},
+          open(snap_p, "w"))
+scr, paint, animating, left = frame()
+tab_x = {x for _y, x, t, _a in scr.rows if t.startswith("(")}
+hb_x = {x for _y, x, t, _a in scr.rows if t.startswith("hb:")}
+check("E11b CJK tab names: (tab) and hb: still start at the same x (display width, not len)",
+      len(tab_x) == 1 and len(hb_x) == 1, "tabs=%s hb=%s" % (sorted(tab_x), sorted(hb_x)))
+check("E11c dwidth: CJK/emoji are two cells, dtrim never overflows",
+      hb.dwidth("验收") == 4 and hb.dwidth("😴") == 2
+      and all(hb.dwidth(hb.dtrim(s, n)) <= n
+              for s in ("验收 · dev→preprod", "👂 abc") for n in (0, 3, 8)),
+      "%s %s" % (hb.dwidth("验收"), hb.dwidth("😴")))
+open(snap_p, "w").write(keep)
 
 # ---- Signal animation: pose the pass at "just happened" to see the signal run ----
 snap_p = os.path.join(hb.HB_DIR, "last-pass.json")
-snap0 = json.load(open(snap_p))
-# Two signals at once: each row must show its own tab name (this bug really happened).
 two = json.load(open(snap_p))
-two["pairs"] = [dict(two["pairs"][0]),
-                dict(two["pairs"][0], tab="wE:tJ", tab_name="refactor",
-                     target="wE:pJ", why="reviewer-stuck", action="interrupt")]
-json.dump(two, open(snap_p, "w"))
+base = two["pairs"][0]
+quiet = dict(base, tab="wE:t0", tab_name="quiet", flag=True, action=None, target=None, why=None,
+             panes=[dict(base["panes"][0], id="wE:pQ", status="idle", age=60)])
+two["pairs"] = [quiet, dict(base)]        # the called pair is second: the signal must travel
+
+
+def pose(age):
+    two["ts"], two["took"] = time.time() - age, 0
+    two["pid"] = os.getpid()
+    json.dump(two, open(snap_p, "w"))
+    return frame()
+
+
+scr, paint, animating, left = pose(0.62)    # trunk lit, branch in flight
+print("-- 0.62s after call: signal on the trunk/branch --\n" + "\n".join("%2d| %s" % (y, t) for y, t in sorted(paint.items())))
+check("E12 right after a call: animating (returns True)", animating is True, str(animating))
+check("E13 the signal runs down the trunk (signal-colored ┃/┣ segments above the called leaf)",
+      any(t in ("┃", "┣", "┗") for t in lit(scr)), str(lit(scr)))
+check("E14 the signal runs along the branch to the pane (signal-colored ━ and ●)",
+      any("━" in t for t in lit(scr)) or any(t == "●" for t in lit(scr)), str(lit(scr)))
+
+scr, paint, animating, left = pose(0.95)    # arrived: flash
+check("E15 the leaf flashes after receiving (✦ pulse, signal color)",
+      any("✦" in t for _y, _x, t, _a in scr.rows) and animating is True,
+      str([t for _y, _x, t, a in scr.rows if a == SIG]))
+
+scr, paint, animating, left = pose(6)       # past the animation window
+check("E16 past the window: not animating (but the ➤ mark stays, so the call is still visible)",
+      animating is False and not lit(scr)
+      and any("➤" in t and "in-progress" in t for t in paint.values()), str(lit(scr)))
+
+# Two signals at once: each row must show its own tab name (this bug really happened).
+two2 = json.load(open(snap_p))
+two2["pairs"] = [dict(two2["pairs"][0], action="prompt", target="wE:pV", why="worker-stuck",
+                      tab="wE:t1", tab_name="in-progress"),
+                 dict(two2["pairs"][0], action="interrupt", target="wE:pJ", why="reviewer-stuck",
+                      tab="wE:tJ", tab_name="refactor")]
+two2["ts"], two2["took"], two2["pid"] = time.time() - 1.0, 0, os.getpid()
+json.dump(two2, open(snap_p, "w"))
 scr, paint, animating, left = frame()
-print("-- two signals at once (0.9s after call) --\n" + "\n".join("%2d| %s" % (y, t) for y, t in sorted(paint.items())))
-leaves = [t for t in paint.values() if "📣" in t]
-check("E13b two signals at once: each row keeps its own tab / target pane",
+leaves = [t for t in paint.values() if ("in-progress" in t or "refactor" in t)]
+check("E17 two signals at once: each row keeps its own tab / target pane",
       len(leaves) == 2
       and sum("in-progress" in t and "wE:pV" in t for t in leaves) == 1
       and sum("refactor" in t and "wE:pJ" in t for t in leaves) == 1,
       str(leaves))
 
-
-snapshot_at(0.25)                                   # signal still on the trunk
-scr, paint, animating, left = frame()
-print("-- 0.25s after call: signal on the trunk --\n" + "\n".join("%2d| %s" % (y, t) for y, t in sorted(paint.items())))
-check("E10 right after a call: animating (returns True)", animating is True, str(animating))
-check("E11 a signal dot ◆ on the trunk (not branched yet)", any(t == "◆" for t in lit(scr)), str(lit(scr)))
-
-snapshot_at(0.62)                                   # on the branch, not at the leaf
-scr, paint, animating, left = frame()
-print("-- 0.62s after call: signal on the branch --\n" + "\n".join("%2d| %s" % (y, t) for y, t in sorted(paint.items())))
-check("E12 trunk lit to this row + branch partly lit + ● in flight",
-      any(t == "┗" for t in lit(scr)) and any(t == "●" for t in lit(scr)) and len(lit(scr)) >= 3,
-      str(lit(scr)))
-
-snapshot_at(1.0)                                    # reached the pane, flash
-scr, paint, animating, left = frame()
-check("E13 leaf flashes after receiving (✦ pulse, signal color)",
-      any("✦" in t for _y, _x, t, _a in scr.rows) and animating is True,
-      str([t for _y, _x, t, a in scr.rows if a == SIG]))
-
-snapshot_at(6)                                      # past the animation window
-scr, paint, animating, left = frame()
-check("E14 past the window: not animating (but 📣 stays, so the call is still visible)",
-      animating is False and not lit(scr)
-      and any("📣" in t for t in paint.values()), str(lit(scr)))
-
+# A pass where nobody is working -> the quiet pair is muted/idle, no call.
 with open(os.path.join(d, "selftest__wE:t1.json"), "w") as f:
     json.dump({"session": "selftest", "tab": "wE:t1", "reviewer_pane": "wE:pV", "current": True,
                "current_since": "2026-10-16T13:01:41", "current_reason": "long task", "history": []}, f)
 run(["run", "--herdr-bin", FAKE], fake_env(d))
 rows, all_text, animating, left = render()
-check("E15 hb:true: drawn as 😴 + hb:true + block start time (hour:minute) + skip",
-      any("😴 in-progress" in t and "hb:true 13:01" in t and "skip" in t
+check("E18 hb:true: drawn as ‖ + hb:true + block start time (hour:minute) + muted + —",
+      any("‖" in t and "in-progress" in t and "hb:true 13:01" in t and "muted" in t and "—" in t
           for t in rows.values()), all_text)
 
 # Two pairs + a short screen -> the second does not fit and must say so.
@@ -672,22 +714,49 @@ two["pairs"] = two["pairs"] + [dict(two["pairs"][0], tab="wE:t2", tab_name="mast
 json.dump(two, open(snap_p, "w"))
 rows, all_text, animating, left = render(h=4, w=60)
 print("-- 4x60 (two pairs) --\n" + "\n".join("%2d| %s" % (y, t) for y, t in sorted(rows.items())))
-check("E16 very short screen (4 rows, two pairs): no crash, says how many pairs were not drawn",
+check("E19 very short screen (4 rows, two pairs): no crash, says how many pairs were not drawn",
       any("more)" in t for t in rows.values()), all_text)
 
-# Daemon dead for a long time -> header says so.
+# Paused -> flatline + PAUSED, not NO SIGNAL.
 snap = json.load(open(snap_p))
-snap["ts"], snap["pid"], snap["took"] = time.time() - 7200, 999999, 2
+snap["ts"], snap["pid"], snap["took"], snap["paused"] = time.time() - 6, os.getpid(), 0, True
 json.dump(snap, open(snap_p, "w"))
 rows, all_text, animating, left = render()
-check("E17 two-hour-old snapshot: says daemon gone + second row says last pass 2.0h ago",
-      "daemon gone" in rows[0] and "2.0h" in rows[1], rows.get(0) + " | " + rows.get(1))
+check("E20 paused: the vitals say PAUSED (the daemon is alive but not passing)",
+      "PAUSED" in all_text and "NO SIGNAL" not in all_text and "paused" in rows[0], all_text)
+
+# Daemon dead for a long time -> header says so + flatline + the footer shows the long elapsed time.
+snap["paused"], snap["pid"], snap["ts"] = False, 999999, time.time() - 7200
+json.dump(snap, open(snap_p, "w"))
+rows, all_text, animating, left = render()
+check("E21 two-hour-old snapshot: says daemon gone + NO SIGNAL + a huge elapsed time",
+      "daemon gone" in rows[0] and "NO SIGNAL" in all_text and "7200s/20s" in rows[17],
+      rows.get(0) + " | " + rows.get(17))
 
 hb.HB_DIR = tempfile.mkdtemp(prefix="hb-selfE-")
 rows, all_text, animating, left = render()
-check("E18 no snapshot: no crash, says no snapshot",
-      "no snapshot" in rows[0] and "no snapshot" in all_text, all_text)
+check("E22 no snapshot: no crash, says no snapshot / awaiting telemetry",
+      "no snapshot" in rows[0] and "AWAITING TELEMETRY" in all_text
+      and "no snapshot yet" in rows[17], all_text)
+
+# --demo renders synthetic pairs and reads/writes nothing.
+before = mutations(hb.HB_DIR)
+hb.TOP_DEMO = True
+rows, all_text, animating, left = render()
+hb.TOP_DEMO = False
+check("E23 --demo: clearly labeled synthetic pairs, no file reads or writes",
+      "3 pairs" in rows[0] and "DEMO" in rows[0] and "demo:t1" in all_text
+      and "no snapshot" not in all_text and "NO SIGNAL" not in all_text
+      and mutations(hb.HB_DIR) == before, rows.get(0))
 hb.HB_DIR = os.path.dirname(HB)   # restore
+
+hs = StubScreen(26, 96)
+hb.top_help(hs, dict(TEST_ATTRS))
+help_rows = lines_of(hs)
+help_text = " | ".join(help_rows.values())
+check("E23b ? help explains pair / marks / gauge / hb_block / 10m",
+      "legend" in help_text and "worker" in help_text and "hb_block" in help_text
+      and "10m" in help_text, help_text)
 
 # where(): herdr omits HERDR_SESSION for the default session; a single running
 # session is unambiguous, two are not.
@@ -716,7 +785,7 @@ snap = json.load(open(snap_p))
 snap["pid"] = os.getpid()
 json.dump(snap, open(snap_p, "w"))
 rows, all_text, animating, left = render()
-check("E19 live pid: header shows pid, not 'daemon gone'",
+check("E24 live pid: header shows pid, not 'daemon gone'",
       ("pid %d" % os.getpid()) in rows[0], rows.get(0))
 
 print("\n================ %s ================" % ("all passed" if not fails else "failed: %s" % fails))
