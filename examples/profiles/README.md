@@ -10,6 +10,17 @@ to `~/.pi/agent/profiles/`, then edit the rules to match your own setup.
 - `reviewer.conf`: adds `last_answer` (read the worker's answer) and `hb_block`
   (silence the watchdog).
 
+Both mount `resume-profile/resume_argv.ts`, which reports
+`pi-profile <role> --session <file>` to herdr so a restarted pane comes back as
+the same role instead of bare pi. `bin/pi-profile` exports
+`HERDR_PAIR_PROFILE=<role>` for it; keep that line if you write your own profile.
+
+Start panes with `pi-profile`: it sets that variable. If you start pi yourself
+(`pi -e ...`), either mount `resume_argv.ts` and `export HERDR_PAIR_PROFILE=<profile>`
+in the profile, or leave the variable unset and put `<label> = <profile>` in
+`~/.pi/agent/profiles/labels.conf` — that table is the only fallback the reporter
+reads. A bare `pi` in a labelled pane is never upgraded by itself.
+
 They assume the bundle is installed with `pi install git:...`. The package does
 not auto-load the tools; these profiles mount them explicitly. If you keep a
 checkout instead, set `HERDR_PAIR` to its path.

@@ -38,6 +38,20 @@ inside worker >/dev/null 2>"$T/err"
 check "wrong explicit role exits 2" "2" "$?"
 check "wrong explicit role says why" "1" "$(grep -c 'refusing to start' "$T/err")"
 
+# The resume reporter reads the profile name from this variable.
+cat > "$T/bin/pi" <<'EOF2'
+#!/bin/sh
+echo "profile=[${HERDR_PAIR_PROFILE:-}]"
+EOF2
+chmod +x "$T/bin/pi"
+check "the profile name is exported to pi" "profile=[reviewer]" "$(inside)"
+check "an explicit role is exported too" "profile=[worker]" "$(outside worker)"
+cat > "$T/bin/pi" <<'EOF3'
+#!/bin/sh
+echo "pi $*"
+EOF3
+chmod +x "$T/bin/pi"
+
 label worker
 check "worker label picks worker" "pi -ne -ns -np --no-mcp --picked-worker" "$(inside)"
 check "flags go to pi, role still comes from the label" "pi -ne -ns -np --no-mcp --picked-worker --help" "$(inside --help)"
