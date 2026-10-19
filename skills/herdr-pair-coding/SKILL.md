@@ -320,7 +320,7 @@ After=default.target
 
 [Service]
 Type=simple
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:%h/.pi/agent/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/python3 %h/.local/bin/herdr-watchdog daemon
 Restart=on-failure
 RestartSec=15
