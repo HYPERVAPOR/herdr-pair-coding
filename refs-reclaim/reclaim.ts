@@ -75,6 +75,11 @@ const refsReclaim = {
         { description: "apply: which kinds to process; default is all three" },
       ),
     ),
+    authors: Type.Optional(
+      Type.Array(Type.String(), {
+        description: "author substrings (name or email) that may be reclaimed; any other author makes a branch MANUAL (gate AU). Omit = author is not a criterion",
+      }),
+    ),
     allow_unmerged: Type.Optional(
       Type.Boolean({ description: "apply: allow deleting T2 (content not in dev, archive only)" }),
     ),
@@ -86,6 +91,7 @@ const refsReclaim = {
   async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
     const repo = params.repo || (ctx && ctx.cwd) || process.cwd();
     const base = ["--repo", repo];
+    if (params.authors && params.authors.length) base.push("--authors", params.authors.join(","));
     let args;
     if (params.action === "plan") {
       args = ["plan", ...base, "--summary-only"];

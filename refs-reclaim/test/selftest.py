@@ -13,6 +13,8 @@ Covers:
      branches deleted per T1/T2 with a lease; recovery from the bundle; the second plan turns a
      branch that was occupied by a worktree into T1
   E. units: whitelist segment matching (core/__pycache__/ reproducible), dedupe_paths, verify_archived
+  F. author gate (AU): a fully merged branch authored by someone outside --authors is MANUAL in
+     plan and survives apply, while our own branches are still deleted
 
 Run: python3 test/selftest.py
 """
@@ -109,7 +111,14 @@ def make_scratch(root):
     open(os.path.join(seed, "f.txt"), "a").write("unmerged\n")
     git("commit", "-qam", "unmerged work", cwd=seed)
     git("checkout", "-q", "dev", cwd=seed)
-    git("push", "-q", "origin", "dev", "feat/merged", "feat/unmerged", cwd=seed)
+    # feat/foreign: merged content, but authored by someone else -> gate AU must hold it back
+    git("checkout", "-qb", "feat/foreign", "dev", cwd=seed)
+    open(os.path.join(seed, "f.txt"), "a").write("foreign\n")
+    git("-c", "user.name=someone else", "-c", "user.email=s@x.y",
+        "commit", "-qam", "foreign work", cwd=seed)
+    git("checkout", "-q", "dev", cwd=seed)
+    git("merge", "-q", "--no-ff", "feat/foreign", "-m", "merge feat/foreign", cwd=seed)
+    git("push", "-q", "origin", "dev", "feat/merged", "feat/unmerged", "feat/foreign", cwd=seed)
 
     repo = os.path.join(root, "repo")
     subprocess.run(["git", "clone", "-q", origin, repo], check=True)
@@ -134,6 +143,8 @@ def make_scratch(root):
     git("worktree", "add", "-q", "--detach", wt_detached, "dev", cwd=repo)
     # local-only branch not occupied by any worktree (T1: tip already in dev)
     git("branch", "review/local-only", "dev", cwd=repo)
+    # local branch whose tip was authored by someone else (gate AU)
+    git("branch", "feat/foreign", "origin/feat/foreign", cwd=repo)
 
     return {"root": root, "repo": repo, "wt_merged": wt_merged, "wt_clean": wt_clean,
             "wt_unmerged": wt_unmerged, "wt_detached": wt_detached,
@@ -279,6 +290,36 @@ def main():
         check("D11 second plan: feat/merged becomes T1 (was occupied by a worktree)",
               (verdict(plan2, "local_branches", "feat/merged") or {}).get("verdict") == "T1",
               verdict(plan2, "local_branches", "feat/merged"))
+
+        # ---------------- F. author gate (AU) ----------------
+        root2 = tempfile.mkdtemp(prefix="rr-selftest-author-")
+        try:
+            s2 = make_scratch(root2)
+            planA = plan_json(s2, extra=["--ignore-idle", "--authors", "t <a@b.c>"], tag="-auth")
+            ra = verdict(planA, "local_branches", "feat/foreign") or {}
+            check("F1 foreign author -> MANUAL (gate AU)",
+                  ra.get("verdict") == "MANUAL" and any(x.startswith("AU no") for x in ra.get("reasons", [])), ra)
+            check("F2 plan records authors", ra.get("authors") == ["someone else <s@x.y>"], ra.get("authors"))
+            rm = verdict(planA, "remote_branches", "feat/foreign") or {}
+            check("F3 remote with a foreign author -> MANUAL", rm.get("verdict") == "MANUAL", rm)
+            check("F4 our own branch is still T1",
+                  (verdict(planA, "local_branches", "review/local-only") or {}).get("verdict") == "T1",
+                  verdict(planA, "local_branches", "review/local-only"))
+            pa = run_cli(["archive", "--repo", s2["repo"], "--outdir", s2["archive"], "--yes",
+                          "--plan", os.path.join(s2["root"], "plan-auth.json")])
+            mpath = [l.split(": ", 1)[1] for l in pa.stdout.splitlines() if l.startswith("[P3] manifest:")][0]
+            run_cli(["apply", "--repo", s2["repo"], "--allow-unmerged-branch", "--yes",
+                     "--plan", os.path.join(s2["root"], "plan-auth.json"),
+                     "--archive-manifest", mpath, "--authors", "t <a@b.c>"])
+            check("F5 apply leaves the foreign local branch alone",
+                  "feat/foreign" in git("branch", cwd=s2["repo"]), git("branch", cwd=s2["repo"]))
+            remote2 = git("ls-remote", "--heads", "origin", cwd=s2["repo"])
+            check("F6 apply leaves the foreign remote branch alone",
+                  "refs/heads/feat/foreign" in remote2, remote2)
+            check("F7 apply still deletes our own branch",
+                  "review/local-only" not in git("branch", cwd=s2["repo"]), git("branch", cwd=s2["repo"]))
+        finally:
+            shutil.rmtree(root2, ignore_errors=True)
 
         # ---------------- E. units ----------------
         m = load_cli()

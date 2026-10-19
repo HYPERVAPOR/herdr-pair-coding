@@ -337,5 +337,11 @@ watchdog wakes them.
 
 - Never `refs-reclaim apply` without explicit confirmation: it deletes worktrees
   and branches, and wants `confirm=true` plus `--yes`.
+- Pass `--authors` (or `REFS_RECLAIM_AUTHORS`) on every `plan`/`apply`: `T1` only
+  proves the content is already in the base branch, it says nothing about who owns
+  the ref. Without it the author gate reports `AU skip` and foreign branches are
+  `T1` just like yours.
+- `--only` replaces the default scope; it never adds to it. Check the `[P4]`/`[P5]`/
+  `[P6]` lines in the output to see which stage actually ran.
 - Do not edit `~/.pi/agent/extensions/herdr-agent-state.ts`; herdr owns it.
 - Read an extension before installing a package that carries it.

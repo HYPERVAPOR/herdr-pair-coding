@@ -9,6 +9,10 @@ I  : when a ref is deleted, its tip must already be contained in origin/<base>, 
 I' : `git bundle` does not include untracked/ignored files, so before removing a
      worktree every untracked file outside the whitelist must be copied into the
      archive directory and hashed with sha256.
+I'': a ref may be deleted only when every author of the commits it adds - or its tip
+     author, when the branch is fully merged - matches `--authors`. Content being in
+     dev says nothing about who owns the ref name. Unset `--authors` = gate not
+     configured (reported as `AU skip`).
 fail-closed: if any check cannot be resolved (fetch/herdr/proc/MR lookup/bundle
      verify/lease failure), the answer is "do not delete".
 
@@ -128,6 +132,35 @@ def rev(repo, ref):
 
 def is_ancestor(repo, ref, of):
     return git_ok(repo, "merge-base", "--is-ancestor", ref, of)
+
+
+def commit_authors(repo, *logargs):
+    rc, out, _ = git(repo, "log", "--format=%an <%ae>", *logargs)
+    if rc:
+        return set()
+    return {line.strip() for line in out.splitlines() if line.strip()}
+
+
+def branch_authors(repo, tip, base_sha):
+    """Who authored what this branch adds on top of the baseline. A fully merged branch adds
+    nothing, yet its ref name is still somebody's, so fall back to the tip author."""
+    authors = commit_authors(repo, f"{base_sha}..{tip}")
+    if not authors:
+        authors = commit_authors(repo, "-1", tip)
+    return authors
+
+
+def author_gate(a, authors):
+    """AU: a ref is reclaimable only when every author of its own commits matches --authors
+    (substring, case-insensitive). Unset --authors = gate not configured -> SKIP."""
+    allowed = [x for x in (getattr(a, "authors", None) or []) if x]
+    if not allowed:
+        return True, "AU skip: --authors not configured (author is not a criterion)"
+    low = [x.lower() for x in allowed]
+    bad = sorted(x for x in authors if not any(s in x.lower() for s in low))
+    if bad:
+        return False, "AU no: not an allowed author: " + ", ".join(bad)
+    return True, "AU yes: " + ", ".join(sorted(authors))
 
 
 def remote_url(repo, remote="origin"):
@@ -462,7 +495,13 @@ def build_plan(a):
             r["landed"] = why
             grouped = grouped_commit_count(repo, tip, a.remote)
             mr = (mrs or {}).get(name)
-            if mr:
+            auth = branch_authors(repo, tip, base_sha)
+            r["authors"] = sorted(auth)
+            auth_ok, auth_why = author_gate(a, auth)
+            r["reasons"].append(auth_why)
+            if not auth_ok:
+                r.update(verdict="MANUAL", reasons=[auth_why])
+            elif mr:
                 r.update(verdict="BLOCKED", reasons=[f"L4 no: open MR {','.join(mr)}"])
             elif landed:
                 r.update(verdict="T1", reasons=[f"L3 yes: {why}"])
@@ -490,7 +529,13 @@ def build_plan(a):
             landed, why = content_landed(tip)
             r["landed"] = why
             mr = (mrs or {}).get(name)
-            if mr:
+            auth = branch_authors(repo, tip, base_sha)
+            r["authors"] = sorted(auth)
+            auth_ok, auth_why = author_gate(a, auth)
+            r["reasons"].append(auth_why)
+            if not auth_ok:
+                r.update(verdict="MANUAL", reasons=[auth_why])
+            elif mr:
                 r.update(verdict="BLOCKED", reasons=[f"O3 no: open MR {','.join(mr)}"])
             elif landed:
                 r.update(verdict="T1", reasons=[f"O2 yes: {why}"])
@@ -744,6 +789,10 @@ def cmd_apply(a, plan, manifest):
             cur = rev(repo, f"refs/heads/{r['name']}")
             if cur != r["head"]:
                 log["skipped"].append({"name": r["name"], "why": "tip changed"}); continue
+            auth_ok, auth_why = author_gate(a, branch_authors(repo, cur, plan["base_sha"]))
+            if not auth_ok:
+                log["skipped"].append({"name": r["name"], "why": auth_why})
+                print(f"  skip branch {r['name']}: {auth_why}"); continue
             if r["verdict"] == "T1":
                 cmd = ["git", "-C", repo, "branch", "-d", r["name"]]
             else:
@@ -760,6 +809,10 @@ def cmd_apply(a, plan, manifest):
         for r in plan["remote_branches"]:
             if r["verdict"] not in ("T1", "T2"):
                 continue
+            auth_ok, auth_why = author_gate(a, branch_authors(repo, r["head"], plan["base_sha"]))
+            if not auth_ok:
+                log["skipped"].append({"name": r["name"], "why": auth_why})
+                print(f"  skip remote {r['name']}: {auth_why}"); continue
             if mr_status == "ok" and mrs.get(r["name"]):
                 log["skipped"].append({"name": r["name"], "why": "open MR appeared"}); continue
             if r["verdict"] == "T2" and not a.allow_unmerged_branch:
@@ -810,6 +863,9 @@ def main():
     common.add_argument("--docker", action="store_true", help="count docker bind mounts as in use")
     common.add_argument("--herdr-bin", default="herdr", help="herdr executable (use a fake in tests)")
     common.add_argument("--allow-release", action="store_true", help="allow release/* to be judged")
+    common.add_argument("--authors", default=os.environ.get("REFS_RECLAIM_AUTHORS", ""),
+                        help="comma-separated author substrings (name or email) that may be reclaimed;"
+                             " a branch with any other author becomes MANUAL (gate AU). Empty = not a criterion")
     common.add_argument("--outdir", default=None, help="archive directory (default <parent of repo>/.archive)")
 
     p_plan = sub.add_parser("plan", parents=[common], help="P0-P2 read-only: produce the classification list")
@@ -826,7 +882,7 @@ def main():
     p_apply = sub.add_parser("apply", parents=[common], help="P4-P6 execute deletion")
     p_apply.add_argument("--plan", required=True)
     p_apply.add_argument("--archive-manifest", required=True)
-    p_apply.add_argument("--only", action="append", default=["worktrees", "branches", "remote-branches"],
+    p_apply.add_argument("--only", action="append", default=None,
                          choices=["worktrees", "branches", "remote-branches"])
     p_apply.add_argument("--yes", action="store_true")
     p_apply.add_argument("--allow-base-move", action="store_true")
@@ -838,6 +894,9 @@ def main():
     a = ap.parse_args()
     a.protected = [x for x in a.protected.split(",") if x]
     a.whitelist = [x for x in a.whitelist.split(",") if x]
+    a.authors = [x.strip() for x in (a.authors or "").split(",") if x.strip()]
+    if getattr(a, "only", None) is None:
+        a.only = ["worktrees", "branches", "remote-branches"]   # --only replaces the default, never adds to it
 
     if a.cmd == "plan":
         plan = build_plan(a)
