@@ -221,12 +221,22 @@ stays a profile.
   keeps the command while that agent holds the pane, and herdr's own
   state-only reports (they carry no command) do not clear it: measured on
   0.9.3 by running a full turn and re-reading the persisted session file.
+- A report can be dropped. herdr only stores the command once it recognizes the
+  pane's agent, and at session start the report often beats that detection: the
+  answer is `resume_not_accepted`, or nothing while the previous command stays.
+  So the report is retried with a fresh seq (0 / 250 / 750 / 1500 ms, under 4 s,
+  then it gives up silently) and a newer state cancels the older retry, so a
+  slow `working` can never land after a newer `idle`. Before that retry existed,
+  "start pi, restart herdr without asking anything" came back as bare pi, and a
+  changed profile came back as the old role.
 - The resumed command is `pi-profile`, so `~/.local/bin` (or wherever the link
   lives) must be on `PATH` — step 3.
 - herdr writes the command to
   `~/.config/herdr/sessions/<name>/session.json` as `agent_resume.argv`.
-  herdr 0.9.3 does this. Versions without self-reported resume commands accept
-  the report and ignore the command: the pane then restores as bare pi, and
+  herdr 0.9.3 does this. herdr's docs label self-reported resume commands
+  "0.10.0 and newer" for third-party agents; we measured 0.9.3, so treat
+  `agent_resume` showing up in `session.json` as the truth for your build. A
+  version that ignores the command accepts the report and restores bare pi, and
   nothing else changes.
 - A pane whose session was started before this package (or before an update) has
   no reporter loaded: restart it with `pi-profile`, or `/reload`.
@@ -248,8 +258,12 @@ herdr --session resume-test          # its own server and socket
 # in a pane: label it (step 6), then start pi-profile there
 herdr session stop resume-test
 herdr --session resume-test          # the pane should come back as the profile
-grep -o '"agent_resume":{[^}]*}' ~/.config/herdr/sessions/resume-test/session.json
+python3 -c "import json; d=json.load(open('$HOME/.config/herdr/sessions/resume-test/session.json')); print([p.get('agent_resume') for w in d['workspaces'] for t in w['tabs'] for p in t['panes'].values()])"
 ```
+
+`session.json` is pretty-printed, so a one-line `grep` never matches it: read the
+JSON. One entry per pane; `None` means herdr has no resume command for it (bare
+pi).
 
 A pane restored as a profile shows `HERDR_PAIR_PROFILE` in its environment; a
 pane restored as bare pi does not.
@@ -293,6 +307,11 @@ herdr-watchdog daemon
 ```
 
 On Linux, as a systemd user service:
+
+A user unit reads no shell rc at all (`~/.bashrc`, `.zshrc`, fish conf.d — none),
+so the `Environment=PATH=` line is not optional: without it the unit cannot find
+`herdr-watchdog`. It lists `~/.local/bin` and `~/.pi/agent/bin` by hand, which is
+exactly what the shell normally does from wherever the user put them.
 
 ```ini
 [Unit]
@@ -346,6 +365,11 @@ CLI checks:
 - Footer shows `⚠ <role> in <other> pane` or a role notification: the pane label
   and the loaded profile disagree. Restart with `pi-profile` (no argument), or
   rename the pane.
+- A restarted pane drops to a shell with `pi-profile: this pane is labeled 'x';
+  refusing to start the 'y' profile`: the resume command carries the profile the
+  pane was *started* with, and the label changed since (`herdr pane rename`).
+  Start the agent again with `pi-profile` (no argument) so it reports the role
+  that matches the label.
 - Watchdog finds no pair: the pane labels must contain `worker` and `reviewer`.
 - Watchdog cannot find `herdr` under systemd: add `~/.local/bin` to the unit's
   `PATH`.

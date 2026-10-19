@@ -15,6 +15,12 @@ Both mount `resume-profile/resume_argv.ts`, which reports
 the same role instead of bare pi. `bin/pi-profile` exports
 `HERDR_PAIR_PROFILE=<role>` for it; keep that line if you write your own profile.
 
+Start panes with `pi-profile` (it sets that variable). If you start pi yourself,
+`pi -e ...`, either add the `-e` line for `resume_argv.ts` *and* have
+`pi-profile` in the loop, or put `<label> = <profile>` in
+`~/.pi/agent/profiles/labels.conf` — that table is the only fallback the reporter
+reads. A bare `pi` in a labelled pane is never upgraded by itself.
+
 They assume the bundle is installed with `pi install git:...`. The package does
 not auto-load the tools; these profiles mount them explicitly. If you keep a
 checkout instead, set `HERDR_PAIR` to its path.

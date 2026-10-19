@@ -25,7 +25,21 @@ command as `agent_resume.argv` in `~/.config/herdr/sessions/<name>/session.json`
 herdr's own state-only reports do not clear it. Older herdr versions accept the
 report and ignore the command, so the pane restores as bare pi.
 
+Reports can be dropped: herdr stores the command only once it recognizes the
+pane's agent, and at session start the report often beats that detection. The
+answer is parsed (`{"error":...}` or a timeout is a failure), a failed report is
+retried with a fresh seq after 0 / 250 / 750 / 1500 ms — under 4 s — and then
+dropped silently. Only one retry chain runs at a time and a newer state cancels
+an older one, so a slow `working` can never overwrite a newer `idle` (the
+watchdog reads that state). With no session file yet, nothing is reported at
+all: a command without `--session` would only overwrite a good saved one.
+
+Windows named pipes (`\\.\pipe\...`) are not handled; the official integration
+has them. Linux and macOS are the supported test surface.
+
 Turning herdr's agent restore off disables this too:
 `[session] resume_agents_on_restore = false` in `~/.config/herdr/config.toml`.
 
-Test: `node resume-profile/test/resume_argv.test.mjs` (no herdr, no socket).
+Test: `node resume-profile/test/resume_argv.test.mjs` (a fake unix socket, no
+herdr). It resolves jiti from the newest `~/.pi/agent/install/releases` directory,
+so it assumes a normal pi install on the machine running it.

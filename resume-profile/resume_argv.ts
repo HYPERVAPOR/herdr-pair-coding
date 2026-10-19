@@ -16,6 +16,13 @@
  * reporter must already hold the pane (it does: the official
  * herdr-agent-state.ts reported it at session start).
  *
+ * The report can be dropped: herdr only stores resume_argv once the pane's agent
+ * is recognized, and at session start we often beat that detection — the answer
+ * is `resume_not_accepted`, or nothing at all while the previous command stays
+ * in place (which would bring the pane back as the *old* role). So: parse the
+ * answer, and retry a few times with a fresh seq (herdr drops non-increasing
+ * seq), then give up silently.
+ *
  * Version note: measured working on herdr 0.9.3, which persists the command as
  * agent_resume.argv when the pane's own agent reports it. A binary that does not
  * support self-reported resume commands accepts the report and ignores the
@@ -60,10 +67,10 @@ export function resumeRole(env, label, labels) {
   return (label && labels && labels.get(label)) || null;
 }
 
+// No session file (nothing written to disk yet) -> no command at all: a bare
+// `pi-profile <role>` would add nothing and would overwrite a good saved one.
 export function resumeArgv(role, sessionFile) {
-  return sessionFile
-    ? ["pi-profile", role, "--session", sessionFile]
-    : ["pi-profile", role];
+  return sessionFile ? ["pi-profile", role, "--session", sessionFile] : null;
 }
 
 function labelsConf(file = path.join(process.env.HOME || "", ".pi/agent/profiles/labels.conf")) {
@@ -85,6 +92,10 @@ function paneLabel() {
   }
 }
 
+const ATTEMPT_TIMEOUT_MS = 300;
+// 0 + 250 + 750 + 1500 ms of waiting, four attempts, < 4 s worst case.
+const RETRY_DELAYS = [0, 250, 750, 1500];
+
 // herdr ignores a report whose seq is not greater than the last accepted one.
 // The official integration reports on the same events with its own
 // Date.now()*1000 + counter; measured on 0.9.3, its later reports without
@@ -96,26 +107,44 @@ function nextSeq() {
   return seq;
 }
 
-function send(report, timeoutMs = 500) {
+// One attempt. Resolves "ok" only when herdr answers without an error: an
+// accepted report looks like {"result":{"type":"ok"}}, a refusal like
+// {"error":{"code":"resume_not_accepted",...}}.
+export function send(report, socketPath, timeoutMs = ATTEMPT_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let done = false;
     let timer;
-    const socket = net.createConnection(process.env.HERDR_SOCKET_PATH);
-    const finish = (ok) => {
+    let data = "";
+    const socket = net.createConnection(socketPath);
+    const finish = (outcome) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       socket.destroy();
-      resolve(ok);
+      resolve(outcome);
     };
-    socket.on("error", () => finish(false));
+    socket.on("error", () => finish("error"));
     socket.on("connect", () => socket.write(`${JSON.stringify(report)}\n`));
-    socket.on("data", () => finish(true));
-    socket.on("end", () => finish(false));
-    timer = setTimeout(() => finish(false), timeoutMs);
+    socket.on("data", (chunk) => {
+      data += chunk;
+      const nl = data.indexOf("\n");
+      if (nl < 0) return;                 // wait for the full line
+      let answer;
+      try {
+        answer = JSON.parse(data.slice(0, nl));
+      } catch {
+        return finish("error");
+      }
+      // Accepted: {"id":...,"result":{...}}. Refused: {"id":...,"error":{...}}.
+      finish(answer && answer.error ? "error" : answer && answer.result ? "ok" : "error");
+    });
+    socket.on("end", () => finish("error"));
+    timer = setTimeout(() => finish("timeout"), timeoutMs);
     timer.unref?.();
   });
 }
+
+const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
 
 export default function (pi) {
   if (!enabled()) {
@@ -125,20 +154,54 @@ export default function (pi) {
   let role = null;
   let rootSession = false;
 
-  // Fire-and-forget: herdr must never slow pi down, and a failed report only
-  // costs the resume command. Never awaited, never retried.
+  // One retry chain at a time, latest state wins. Two chains would race: a slow
+  // `working` retry landing after a fast `idle` success would put the pane back
+  // to working until the next event, and herdr-watchdog reads that state.
+  let inFlight = false;
+  let wanted;
+
   function publish(state, ctx) {
     if (!rootSession || !role) return;
+    wanted = { state, ctx };
+    if (!inFlight) void drain();
+  }
+
+  async function drain() {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      while (wanted) {
+        const { state, ctx } = wanted;
+        wanted = undefined;
+        if (!(await report(state, ctx))) continue;
+      }
+    } finally {
+      inFlight = false;
+      if (wanted) void drain();
+    }
+  }
+
+  // Resolves true when herdr took the report, false when it was dropped.
+  async function report(state, ctx) {
     let sessionFile;
     try {
       const file = ctx?.sessionManager?.getSessionFile?.();
       if (typeof file === "string" && path.isAbsolute(file)) sessionFile = file;
     } catch {}
-    const params = { pane_id: process.env.HERDR_PANE_ID, source: SOURCE, agent: AGENT, state, seq: nextSeq() };
-    if (sessionFile) params.agent_session_path = sessionFile;
-    params.resume_argv = resumeArgv(role, sessionFile);
-    void send({ id: `${SOURCE}:resume:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-      method: "pane.report_agent", params });
+    const argv = resumeArgv(role, sessionFile);
+    if (!argv) return false;            // nothing on disk yet: keep the saved one
+    const params = { pane_id: process.env.HERDR_PANE_ID, source: SOURCE, agent: AGENT, state };
+    params.agent_session_path = sessionFile;
+    params.resume_argv = argv;
+    for (const delay of RETRY_DELAYS) {
+      if (delay) await sleep(delay);
+      if (wanted) return false;         // a newer state is queued: send that instead
+      params.seq = nextSeq();           // herdr drops a seq it has already seen
+      const req = { id: `${SOURCE}:resume:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        method: "pane.report_agent", params: { ...params } };
+      if (await send(req, process.env.HERDR_SOCKET_PATH) === "ok") return true;
+    }
+    return false;
   }
 
   pi.on("session_start", (_event, ctx) => {
