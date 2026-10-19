@@ -823,6 +823,18 @@ def cmd_apply(a, plan, manifest):
                 cmd = ["git", "-C", repo, "branch", "-D", r["name"]]
             print(f"  [P5] {' '.join(cmd)}")
             rc, out, err = run(cmd)
+            if rc == 0 and r["verdict"] == "T1":
+                pass
+            elif r["verdict"] == "T1":
+                # `-d` compares against the local base (often a stale `dev`), not against
+                # origin/<base>. The T1 proof above is the real guard, so retry with -D when
+                # that proof still holds; otherwise fail closed.
+                if is_ancestor(repo, cur, f"{remote}/{base}"):
+                    cmd = ["git", "-C", repo, "branch", "-D", r["name"]]
+                    print(f"  [P5] (local {base} is stale, -d refused) {' '.join(cmd)}")
+                    rc, out, err = run(cmd)
+                else:
+                    err = (err + " ; tip is no longer in " + f"{remote}/{base}").strip()
             (log["done"] if rc == 0 else log["failed"]).append(
                 {"kind": "local_branch", "name": r["name"], "sha": r["head"], "rc": rc, "err": err})
 

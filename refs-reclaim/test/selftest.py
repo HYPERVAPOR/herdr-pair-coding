@@ -17,6 +17,8 @@ Covers:
      plan and survives apply, while our own branches are still deleted
   G. --include-manual: a MANUAL (detached) worktree with a live process inside is refused, and is
      removed only once the process is gone (the gates a hand-rolled removal skips)
+  H. stale local base: a branch merged in origin/dev but not in the local dev is still T1 and is
+     deleted (git branch -d refuses there; the tool retries with -D only while the proof holds)
 
 Run: python3 test/selftest.py
 """
@@ -359,6 +361,39 @@ def main():
             if proc is not None:
                 proc.terminate()
             shutil.rmtree(root3, ignore_errors=True)
+
+        # ---------------- H. T1 branch while the local base is stale ----------------
+        root4 = tempfile.mkdtemp(prefix="rr-selftest-stale-")
+        try:
+            s4 = make_scratch(root4)
+            repo4 = s4["repo"]
+            # origin/dev moves on (pushed from the seed clone); the clone's local dev stays behind
+            git("checkout", "-q", "dev", cwd=os.path.join(root4, "seed"))
+            open(os.path.join(root4, "seed", "f.txt"), "a").write("later\n")
+            git("commit", "-qam", "later dev work", cwd=os.path.join(root4, "seed"))
+            git("push", "-q", "origin", "dev", cwd=os.path.join(root4, "seed"))
+            git("fetch", "-q", "origin", cwd=repo4)
+            later = git("rev-parse", "origin/dev", cwd=repo4).strip()
+            check("H1 local dev is behind origin/dev (the case that made -d refuse)",
+                  git("rev-parse", "dev", cwd=repo4).strip() != later)
+            git("branch", "review/merged-in-origin", later, cwd=repo4)   # merged in origin/dev only
+            planH = plan_json(s4, tag="-stale")
+            check("H2 branch merged in origin/dev = T1 even though local dev lacks it",
+                  (verdict(planH, "local_branches", "review/merged-in-origin") or {}).get("verdict") == "T1",
+                  verdict(planH, "local_branches", "review/merged-in-origin"))
+            ph = run_cli(["archive", "--repo", repo4, "--outdir", s4["archive"], "--yes",
+                          "--plan", os.path.join(s4["root"], "plan-stale.json")])
+            mpath4 = [l.split(": ", 1)[1] for l in ph.stdout.splitlines() if l.startswith("[P3] manifest:")][0]
+            pl = run_cli(["apply", "--repo", repo4, "--yes", "--only", "branches",
+                          "--plan", os.path.join(s4["root"], "plan-stale.json"),
+                          "--archive-manifest", mpath4])
+            logp = [l.split(": ", 1)[1] for l in pl.stdout.splitlines() if l.startswith("[P7] log")][0].strip()
+            applyH = json.load(open(logp))
+            check("H3 apply deletes it (-d refused, -D used because origin/dev still contains it)",
+                  "review/merged-in-origin" not in git("branch", cwd=repo4), applyH["failed"])
+            check("H4 that delete is logged as done, not failed", not applyH["failed"], applyH["failed"])
+        finally:
+            shutil.rmtree(root4, ignore_errors=True)
 
         # ---------------- E. units ----------------
         m = load_cli()

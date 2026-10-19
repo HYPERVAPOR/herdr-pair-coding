@@ -60,7 +60,9 @@ refs-reclaim apply   --repo <dir> --plan <plan.json> --archive-manifest <archive
 `--authors` takes substrings of `Name <email>`; it is also read from
 `REFS_RECLAIM_AUTHORS`. Gate `AU` runs in `plan` (verdict `MANUAL`) and again in
 `apply` (row skipped), so a plan made before the allowlist was set is still safe.
-`--only` **replaces** the default set; it never adds to it.
+`--only` **replaces** the default set; it never adds to it. A `T1` local branch whose tip is
+merged in `origin/<base>` but not in the stale local `<base>` is deleted with `-D`
+(`git branch -d` only looks at the local base); the ancestry proof is re-checked first.
 
 `--include-manual [NAME]` (or `*`) removes `MANUAL` worktrees — detached ones
 included — but only after the gates the plan never ran for them: no tracked
