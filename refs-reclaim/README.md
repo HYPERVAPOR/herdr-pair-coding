@@ -53,13 +53,20 @@ refused branch delete, or unprovable safety.
 refs-reclaim plan    --repo <dir> [--idle-hours 2] [--summary-only] [--authors "Ann,Bo"]
 refs-reclaim archive --repo <dir> --plan <plan.json> --yes
 refs-reclaim apply   --repo <dir> --plan <plan.json> --archive-manifest <archive.json> --yes \
-                     [--authors "Ann,Bo"] [--only worktrees] [--only branches]
+                     [--authors "Ann,Bo"] [--only worktrees] [--only branches] \
+                     [--include-manual [NAME]]
 ```
 
 `--authors` takes substrings of `Name <email>`; it is also read from
 `REFS_RECLAIM_AUTHORS`. Gate `AU` runs in `plan` (verdict `MANUAL`) and again in
 `apply` (row skipped), so a plan made before the allowlist was set is still safe.
 `--only` **replaces** the default set; it never adds to it.
+
+`--include-manual [NAME]` (or `*`) removes `MANUAL` worktrees — detached ones
+included — but only after the gates the plan never ran for them: no tracked
+changes, no pane/process/docker with a cwd inside, and quiet for `--idle-hours`.
+Removing those trees by hand with `git worktree remove` is what skips those gates;
+use this flag instead.
 
 pi tool `refs_reclaim` (`action=plan|archive|apply`, `confirm=true` required for
 `apply`) and a read-only `/reclaim` command. Load it explicitly with

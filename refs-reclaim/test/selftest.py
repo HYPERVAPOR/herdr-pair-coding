@@ -15,6 +15,8 @@ Covers:
   E. units: whitelist segment matching (core/__pycache__/ reproducible), dedupe_paths, verify_archived
   F. author gate (AU): a fully merged branch authored by someone outside --authors is MANUAL in
      plan and survives apply, while our own branches are still deleted
+  G. --include-manual: a MANUAL (detached) worktree with a live process inside is refused, and is
+     removed only once the process is gone (the gates a hand-rolled removal skips)
 
 Run: python3 test/selftest.py
 """
@@ -23,9 +25,11 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.dont_write_bytecode = True
 
@@ -320,6 +324,41 @@ def main():
                   "review/local-only" not in git("branch", cwd=s2["repo"]), git("branch", cwd=s2["repo"]))
         finally:
             shutil.rmtree(root2, ignore_errors=True)
+
+        # ---------------- G. --include-manual still uses the in-use gate ----------------
+        root3 = tempfile.mkdtemp(prefix="rr-selftest-manual-")
+        proc = None
+        try:
+            s3 = make_scratch(root3)
+            busy = os.path.join(root3, "wt-busy")
+            git("worktree", "add", "-q", "--detach", busy, "dev", cwd=s3["repo"])
+            planM = plan_json(s3, tag="-manual")
+            check("G1 live detached worktree = MANUAL",
+                  (verdict(planM, "worktrees", "wt-busy") or {}).get("verdict") == "MANUAL")
+            pma = run_cli(["archive", "--repo", s3["repo"], "--outdir", s3["archive"], "--yes",
+                           "--plan", os.path.join(s3["root"], "plan-manual.json")])
+            mpath3 = [l.split(": ", 1)[1] for l in pma.stdout.splitlines() if l.startswith("[P3] manifest:")][0]
+            # a process whose cwd is inside the tree (what a running test suite looks like)
+            proc = subprocess.Popen(["sh", "-c", "cd %s && sleep 120" % busy], start_new_session=True)
+            time.sleep(1)
+            run_cli(["apply", "--repo", s3["repo"], "--yes", "--only", "worktrees", "--idle-hours", "0",
+                     "--include-manual", "wt-busy",
+                     "--plan", os.path.join(s3["root"], "plan-manual.json"),
+                     "--archive-manifest", mpath3])
+            check("G2 --include-manual refuses a worktree with a live process in it",
+                  os.path.exists(busy), "wt-busy was removed")
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)   # kills the sleep child too
+            proc.wait(10); proc = None
+            time.sleep(0.5)
+            run_cli(["apply", "--repo", s3["repo"], "--yes", "--only", "worktrees", "--idle-hours", "0",
+                     "--include-manual", "wt-busy",
+                     "--plan", os.path.join(s3["root"], "plan-manual.json"),
+                     "--archive-manifest", mpath3])
+            check("G3 --include-manual removes it once the process is gone", not os.path.exists(busy))
+        finally:
+            if proc is not None:
+                proc.terminate()
+            shutil.rmtree(root3, ignore_errors=True)
 
         # ---------------- E. units ----------------
         m = load_cli()

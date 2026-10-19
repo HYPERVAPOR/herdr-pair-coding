@@ -9,6 +9,9 @@ I  : when a ref is deleted, its tip must already be contained in origin/<base>, 
 I' : `git bundle` does not include untracked/ignored files, so before removing a
      worktree every untracked file outside the whitelist must be copied into the
      archive directory and hashed with sha256.
+I''': no worktree is removed while a pane, process or docker mount has its cwd inside
+     it. T1/T2 rows carry that check from `plan`; `MANUAL` rows (detached) carry none,
+     so removing them by hand is unsafe - `--include-manual` re-runs the gate in `apply`.
 I'': a ref may be deleted only when every author of the commits it adds - or its tip
      author, when the branch is fully merged - matches `--authors`. Content being in
      dev says nothing about who owns the ref name. Unset `--authors` = gate not
@@ -745,8 +748,10 @@ def cmd_apply(a, plan, manifest):
         return rev(ref_or_path, "HEAD") if is_wt else rev(repo, ref_or_path)
 
     if "worktrees" in scope:
+        manual = set(a.include_manual or [])
         for r in plan["worktrees"]:
-            if r["verdict"] not in ("T1", "T2"):
+            manual_row = r["verdict"] == "MANUAL" and ("*" in manual or r["name"] in manual)
+            if r["verdict"] not in ("T1", "T2") and not manual_row:
                 continue
             free, why = still_free(r["path"])
             cur = head_now(r["path"], True)
@@ -755,6 +760,22 @@ def cmd_apply(a, plan, manifest):
             if cur != r["head"]:
                 log["skipped"].append({"name": r["name"], "why": f"HEAD changed {r['head'][:8]}->{(cur or '?')[:8]}"})
                 print(f"  skip {r['name']}: HEAD moved"); continue
+            if manual_row:
+                # a MANUAL tree has no W3/W4 verdict from the plan, so the gates run here: a
+                # test suite running inside it is exactly what a hand-rolled removal would hit
+                rc, out, _ = git(r["path"], "status", "--porcelain", "--untracked-files=no")
+                dirty = [l for l in out.splitlines() if l.strip()]
+                if dirty and not a.force_unsafe:
+                    why = f"{len(dirty)} tracked changes not committed"
+                    log["skipped"].append({"name": r["name"], "why": why})
+                    print(f"  skip {r['name']}: {why}"); continue
+                mtime, newest_f = newest_mtime(r["path"])
+                idle_h = (time.time() - mtime) / 3600 if mtime else 1e9
+                if not a.ignore_idle and idle_h < a.idle_hours:
+                    why = f"activity within {idle_h:.2f}h (< {a.idle_hours}h): {newest_f}"
+                    log["skipped"].append({"name": r["name"], "why": why})
+                    print(f"  skip {r['name']}: {why}"); continue
+                print(f"  [P4] --include-manual {r['name']}: free, quiet for {idle_h:.2f}h")
             if r.get("files_outside_whitelist"):
                 purged, bad = [], []
                 for rel in r["files_outside_whitelist"]:
@@ -888,6 +909,10 @@ def main():
     p_apply.add_argument("--allow-base-move", action="store_true")
     p_apply.add_argument("--allow-unmerged-branch", action="store_true",
                          help="allow deleting T2 (content not in dev, archive only)")
+    p_apply.add_argument("--include-manual", action="append", nargs="?", const="*", default=None,
+                         metavar="NAME",
+                         help="also remove MANUAL worktrees (e.g. detached), after the same in-use,"
+                              " quiet and cleanliness gates; no NAME or '*' = every MANUAL worktree")
     p_apply.add_argument("--force-unsafe", action="store_true")
     p_apply.add_argument("--log", default=None)
 
