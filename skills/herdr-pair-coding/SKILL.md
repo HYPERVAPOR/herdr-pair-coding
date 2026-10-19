@@ -130,12 +130,11 @@ Setup ends here. Go to **B**.
 ### B1. 30-second self-check
 
 ```bash
-command -v pi-profile herdr-watchdog herdr-last-answer
+command -v pi-profile herdr-watchdog herdr-last-answer refs-reclaim
 herdr-watchdog run --dry-run      # inside a pane; outside: HERDR_SESSION=<name> first
 ```
 
-Four commands found and a dry run that names a tab and its panes: the tooling is
-there.
+Four commands and a dry run that names a tab: the tooling is there.
 
 ### B2. Create the pair
 
@@ -166,24 +165,25 @@ herdr pane run "$R" pi-profile
 herdr agent prompt "$W" "<the task, one paragraph: repo, scope, what done means>"
 ```
 
-Nothing moves until you do this: a fresh worker sits idle, and the watchdog
-deliberately leaves an idle, silent pair alone. The reviewer reads answers with
-`last_answer` (or `herdr-last-answer <worker>`).
+Nothing moves until you do this: a fresh worker sits idle and the watchdog leaves
+an idle, silent pair alone. The reviewer reads answers with `last_answer`.
 
 ### B4. Watchdog
 
 ```bash
-herdr-watchdog top        # read-only: the header shows the daemon pid
-herdr-watchdog daemon     # only when no daemon is running (systemd: C.3)
+pgrep -af 'herdr-watchdog daemon$'           # a line here = a daemon is running
+systemctl --user is-active herdr-watchdog    # when it runs as the C.3 unit
+herdr-watchdog daemon                        # only when neither does (systemd: C.3)
 ```
 
-`run --dry-run` proves the pair is parsed and what it would say; it does not
-prove a daemon is alive. The pid in `top` does.
+`run --dry-run` proves the pair is parsed and what it would say, not that a daemon
+is alive — `pgrep` does. `herdr-watchdog top` is a human's live view: curses, dies
+without a TTY, so an agent must not call it.
 
 ### B5. Wrap up
 
-`herdr tab close <tab_id>` ends the pair. Worktrees and branches left behind are
-`refs-reclaim`'s job (C.6) — nothing is deleted without `--yes`.
+`herdr tab close <tab_id>` ends the pair; worktrees and branches are
+`refs-reclaim`'s job (C.6), and nothing is deleted without `--yes`.
 
 ## C. Reference
 
@@ -273,16 +273,30 @@ integration, so it appends instead of claiming the pane).
 resume_agents_on_restore = false
 ```
 
-Verify on a session you do not mind restarting (`herdr --session resume-test`):
-label a pane, start `pi-profile` there, `herdr session stop resume-test`, start
-it again, then:
+Verify on a session you do not mind restarting. Attaching needs a TTY, so start
+the client under tmux; every `herdr --session resume-test …` control command then
+works without one:
+
+```bash
+RV="env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_SESSION herdr --session resume-test"
+tmux new-session -d -s rv "$RV"
+herdr --session resume-test pane list                 # label a pane, run pi-profile there
+herdr session stop resume-test && tmux kill-session -t rv
+tmux new-session -d -s rv "$RV"                       # bring it back
+```
+
+`HERDR_*` is cleared for the client because a nested herdr is refused; every
+`herdr --session resume-test …` control command works without a TTY.
+
+After the restart, read the stored command:
 
 ```bash
 python3 -c "import json; d=json.load(open('$HOME/.config/herdr/sessions/resume-test/session.json')); print([p.get('agent_resume') for w in d['workspaces'] for t in w['tabs'] for p in t['panes'].values()])"
 ```
 
-`session.json` is pretty-printed, so a one-line `grep` never matches it: read the
-JSON, one entry per pane, `None` meaning bare pi. A restored profile pane has
+Finally `herdr session stop resume-test && tmux kill-session -t rv`. `session.json`
+is pretty-printed, so a one-line `grep` never matches it: read the JSON, one entry
+per pane, `None` meaning bare pi. A restored profile pane has
 `HERDR_PAIR_PROFILE` in its environment; a bare pi pane does not.
 
 ### C.5 Troubleshooting
