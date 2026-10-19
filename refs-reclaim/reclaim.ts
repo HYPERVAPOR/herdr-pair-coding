@@ -83,6 +83,11 @@ const refsReclaim = {
     allow_unmerged: Type.Optional(
       Type.Boolean({ description: "apply: allow deleting T2 (content not in dev, archive only)" }),
     ),
+    include_manual: Type.Optional(
+      Type.Array(Type.String(), {
+        description: "apply: also remove MANUAL worktrees by name (or '*' for all), after the in-use/quiet/clean gates that a detached row never gets from plan",
+      }),
+    ),
     confirm: Type.Optional(
       Type.Boolean({ description: "apply: must be true (human approved)" }),
     ),
@@ -112,6 +117,7 @@ const refsReclaim = {
       "--archive-manifest", params.archive_manifest, "--yes"];
     for (const o of params.only || []) args.push("--only", o);
     if (params.allow_unmerged) args.push("--allow-unmerged-branch");
+    for (const m of params.include_manual || []) args.push("--include-manual", m);
     return { content: [{ type: "text", text: runCli(args, 600000).trim() }], details: undefined };
   },
 };
