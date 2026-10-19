@@ -66,7 +66,12 @@ const lastAnswer = {
     if (params.n != null) args.push("--n", String(params.n));
     if (params.tools) args.push("--tools");
     try {
-      const out = execFileSync(cli, args, { encoding: "utf8", timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+      const out = execFileSync(cli, args, {
+        encoding: "utf8", timeout: 30000, maxBuffer: 8 * 1024 * 1024,
+        // Capture stderr: inherited stderr is what the user sees smeared into the
+        // one-line result strip under pi's transcript.
+        stdio: ["ignore", "pipe", "pipe"],
+      });
       return { content: [{ type: "text", text: out.trim() || "(empty)" }], details: undefined };
     } catch (e) {
       const detail = `${e.stdout || ""}${e.stderr || ""}`.trim();
@@ -84,9 +89,10 @@ const lastAnswer = {
           details: undefined,
         };
       }
-      // One line on purpose: pi echoes the last tool result in a one-line strip
-      // under the transcript, and a multi-line message overflows it.
-      throw new Error(`${String(detail || e.message).split("\n")[0].trim()} — check the target with herdr pane list`);
+      // pi previews the last tool result on ONE line under the transcript, so keep
+      // it inside 76 characters: the CLI's first line already says what failed.
+      const line = String(detail || e.message).split("\n")[0].trim();
+      throw new Error(line.length > 76 ? line.slice(0, 75) + "…" : line);
     }
   },
 };

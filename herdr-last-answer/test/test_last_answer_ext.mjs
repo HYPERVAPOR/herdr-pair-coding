@@ -60,5 +60,6 @@ try {
 } catch (e) {
   check("a missing target throws (failed tool result)", true);
   check("the failure message is one line", !String(e.message).includes("\n"), JSON.stringify(e.message));
-  check("the failure message says what to do next", /herdr pane list/.test(e.message), e.message);
+  check("the failure message fits an 80-column pane (<=76)", String(e.message).length <= 76, `${String(e.message).length}: ${e.message}`);
+  check("the failure message names the herdr error code", /agent_not_found/.test(e.message), e.message);
 }

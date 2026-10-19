@@ -35,6 +35,7 @@ try {
   check("an unusable flag dir is a failed tool result", true);
   check("its message is one line", !String(e.message).includes("\n"), JSON.stringify(e.message));
   check("its message is not empty", String(e.message).trim().length > 0, JSON.stringify(e.message));
+  check("its message fits an 80-column pane (<=76)", String(e.message).length <= 76, `${String(e.message).length}: ${e.message}`);
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failed` : "\nall passed");

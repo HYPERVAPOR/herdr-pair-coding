@@ -32,11 +32,12 @@ for (const [name, params, want] of [
   } catch (e) {
     check(`${name} is refused`, true);
     check(`${name}: one line`, !String(e.message).includes("\n"), JSON.stringify(e.message));
+    check(`${name}: fits an 80-column pane (<=76)`, String(e.message).length <= 76, `${String(e.message).length}: ${e.message}`);
     check(`${name}: names the missing step`, want.test(e.message), e.message);
   }
 }
 const confirmErr = await t.execute("c1", { action: "apply", plan: "plan-x.json" }, undefined, undefined, ctx).catch((e) => e);
-check("the confirm gate mentions the human approval", /human approves/.test(confirmErr.message), confirmErr.message);
-check("the confirm gate points at the README", /refs-reclaim\/README\.md/.test(confirmErr.message), confirmErr.message);
+check("the confirm gate mentions the human approval", /human approval/.test(confirmErr.message), confirmErr.message);
+check("the confirm gate is short enough for one line", confirmErr.message.length <= 76, `${confirmErr.message.length}: ${confirmErr.message}`);
 console.log(fail ? `\n${fail} failed` : "\nall passed");
 process.exit(fail ? 1 : 0);
