@@ -88,14 +88,16 @@ export default function (pi) {
         const out = execFileSync(
           "python3",
           [CLI, "set", "--action=" + params.action, "--reason=" + params.reason],
-          { encoding: "utf8", timeout: 10000 },
+          { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] },
         );
         refreshStatus();   // the flag may have flipped; update the footer immediately
         return { content: [{ type: "text", text: out.trim() }], details: undefined };
       } catch (e) {
-        // Rejections (reason too long, file not locatable) must reach the model verbatim.
-        const msg = `${e.stdout || ""}${e.stderr || ""}`.trim() || e.message;
-        throw new Error(msg);
+        // Rejections (reason too long, file not locatable) must reach the model
+        // verbatim, but as one line: pi echoes the last tool result in a one-line
+        // strip under the transcript.
+        const msg = (`${e.stdout || ""}${e.stderr || ""}`.trim() || e.message).split("\n")[0].trim();
+        throw new Error(msg.length > 76 ? msg.slice(0, 75) + "…" : msg);
       }
     },
   });

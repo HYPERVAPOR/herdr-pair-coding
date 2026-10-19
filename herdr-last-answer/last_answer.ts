@@ -41,7 +41,7 @@ function resolveCli() {
       /* ignore: try the next candidate */
     }
   }
-  throw new Error(`herdr-last-answer script not found; tried: ${cands.join(", ")}`);
+  throw new Error("last_answer: herdr-last-answer not found — link it into ~/.local/bin or beside the extension");
 }
 
 const lastAnswer = {
@@ -66,7 +66,12 @@ const lastAnswer = {
     if (params.n != null) args.push("--n", String(params.n));
     if (params.tools) args.push("--tools");
     try {
-      const out = execFileSync(cli, args, { encoding: "utf8", timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+      const out = execFileSync(cli, args, {
+        encoding: "utf8", timeout: 30000, maxBuffer: 8 * 1024 * 1024,
+        // Capture stderr: inherited stderr is what the user sees smeared into the
+        // one-line result strip under pi's transcript.
+        stdio: ["ignore", "pipe", "pipe"],
+      });
       return { content: [{ type: "text", text: out.trim() || "(empty)" }], details: undefined };
     } catch (e) {
       const detail = `${e.stdout || ""}${e.stderr || ""}`.trim();
@@ -84,7 +89,10 @@ const lastAnswer = {
           details: undefined,
         };
       }
-      throw new Error(detail || e.message);
+      // pi previews the last tool result on ONE line under the transcript, so keep
+      // it inside 76 characters: the CLI's first line already says what failed.
+      const line = String(detail || e.message).split("\n")[0].trim();
+      throw new Error(line.length > 76 ? line.slice(0, 75) + "…" : line);
     }
   },
 };

@@ -51,3 +51,15 @@ delete process.env.HERDR_BIN;
 
 console.log(fail ? `\nFAILED: ${fail}` : "\nALL PASS");
 process.exit(fail ? 1 : 0);
+
+// Failures are failed tool results, and each message is ONE line: pi echoes the
+// last tool result in a one-line strip under the transcript.
+try {
+  await t.execute("c2", { target: "w1:pZ" }, undefined, undefined, {});
+  check("a missing target throws (failed tool result)", false);
+} catch (e) {
+  check("a missing target throws (failed tool result)", true);
+  check("the failure message is one line", !String(e.message).includes("\n"), JSON.stringify(e.message));
+  check("the failure message fits an 80-column pane (<=76)", String(e.message).length <= 76, `${String(e.message).length}: ${e.message}`);
+  check("the failure message names the herdr error code", /agent_not_found/.test(e.message), e.message);
+}

@@ -27,3 +27,5 @@ pane-width truncation.
 python3 herdr-last-answer/test/test_last_answer.py
 node    herdr-last-answer/test/test_last_answer_ext.mjs
 ```
+
+Failures are reported as a failed tool result (pi's `throw`) whose message is one line — what failed plus the next step; the longer explanation stays in this README.

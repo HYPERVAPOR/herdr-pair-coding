@@ -61,3 +61,5 @@ package manifest.
 python3 refs-reclaim/test/selftest.py
 node    refs-reclaim/test/load.mjs
 ```
+
+Failures are reported as a failed tool result (pi's `throw`) whose message is one line — what failed plus the next step; the longer explanation stays in this README.

@@ -42,12 +42,26 @@ EXIT_FETCH = 2
 EXIT_NO_ANSWER = 3
 
 
-def die(msg, target, code=EXIT_FETCH):
+def die(msg, target, code=EXIT_FETCH, detail=None):
+    # Line 1 is the whole story for a tool result (pi previews one line): keep it
+    # short. The raw payload and the fallback hint are for a human, lines 2-3.
     print("herdr-last-answer: %s" % msg, file=sys.stderr)
     if code != EXIT_NO_ANSWER:
+        if detail:
+            print("  raw: %s" % detail, file=sys.stderr)
         print("  fallback: herdr agent read %s --source recent-unwrapped (screen / stuck / errors)" % target,
               file=sys.stderr)
     sys.exit(code)
+
+
+def short_error(raw, target, code):
+    """herdr answers with {"error":{"code","message"}}: that is the one line."""
+    try:
+        err = json.loads((raw or "").strip().splitlines()[0])["error"]
+        return "%s: %s (%s)" % (err.get("code"), err.get("message"), target)
+    except (ValueError, KeyError, TypeError, IndexError):
+        first = (raw or "").strip().splitlines()[0] if (raw or "").strip() else ""
+        return "herdr exited %d%s (%s)" % (code, (": " + first) if first else "", target)
 
 
 def fetch_session_path(target):
@@ -56,19 +70,19 @@ def fetch_session_path(target):
     try:
         p = subprocess.run([herdr, "agent", "get", target], capture_output=True, text=True, timeout=60)
     except OSError as e:
-        die("cannot run `%s agent get %s`: %s" % (herdr, target, e), target)
+        die("cannot run herdr: %s (%s)" % (e, target), target)
     if p.returncode != 0:
-        tail = (p.stderr or p.stdout or "").strip().splitlines()[-3:]
-        die("`%s agent get %s` exited %d: %s" % (herdr, target, p.returncode, " / ".join(tail)), target)
+        raw = ((p.stdout or "") + (p.stderr or "")).strip()
+        die(short_error(raw, target, p.returncode), target, detail=raw)
     try:
         sess = json.loads(p.stdout)["result"]["agent"]["agent_session"]
     except (ValueError, KeyError, TypeError) as e:
-        die("cannot parse agent_session from `%s agent get %s`: %s" % (herdr, target, e), target)
+        die("no agent_session in herdr's answer (%s)" % target, target, detail=str(e))
     kind, value = sess.get("kind"), (sess.get("value") or "")
     if not value:
-        die("%s has no agent_session.value (there may be no agent in this pane)" % target, target)
+        die("no agent in this pane (%s)" % target, target)
     if kind != "path":
-        die("%s has agent_session.kind=%r, not path; cannot locate the session file" % (target, kind), target)
+        die("agent_session.kind=%s, not path (%s)" % (kind, target), target)
     return value
 
 
