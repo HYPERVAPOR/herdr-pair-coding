@@ -53,6 +53,10 @@ if [ -n "$pane_role" ] && [ "$name" != "$pane_role" ]; then
   exit 2
 fi
 
+# The resume-command reporter (resume-profile/resume_argv.ts) takes the profile
+# name from here, so a restored pane comes back as the same role.
+export HERDR_PAIR_PROFILE="$name"
+
 f="$HOME/.pi/agent/profiles/$name.conf"
 [ -r "$f" ] || {
   echo "pi-profile: no such profile: $f" >&2
