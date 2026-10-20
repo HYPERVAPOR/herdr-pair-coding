@@ -79,19 +79,23 @@ def cmap_of(path):
 class Fallback:
     """Primary Nerd Font + per-character fallbacks for CJK and emoji."""
 
-    def __init__(self, path, size, cjk_path, emoji_path):
+    def __init__(self, path, size, cjk_path, emoji_path, sym_path=None):
         self.faces = {}
-        self.chains = {"primary": [], "cjk": [], "emoji": []}
+        self.chains = {"primary": [], "cjk": [], "sym": [], "emoji": []}
         suffixes = {"": "", "bold": "-Bold", "italic": "-Italic", "bolditalic": "-BoldItalic"}
         for style in STYLES:
             p = path if not suffixes[style] else path.replace("-Regular", suffixes[style])
             if not os.path.exists(p):
                 p = path
             self.faces[("primary", style)] = ImageFont.truetype(p, size)
+        self.paths = {"primary": path}
         primary_cmap = cmap_of(path)
         self.chains["primary"] = [primary_cmap]
         self.chains["cjk"] = [cmap_of(cjk_path)] if cjk_path else []
+        self.chains["sym"] = [cmap_of(sym_path)] if sym_path else []
         self.chains["emoji"] = [cmap_of(emoji_path)] if emoji_path else []
+        self.paths.update({k: v for k, v in
+                           (("cjk", cjk_path), ("sym", sym_path), ("emoji", emoji_path)) if v})
 
         base = self.faces[("primary", "")]
         target = 2 * base.getlength("M")
@@ -103,6 +107,14 @@ class Fallback:
             for style in STYLES:
                 src = bold if (style in ("bold", "bolditalic") and os.path.exists(bold)) else p
                 self.faces[(kind, style)] = ImageFont.truetype(src, s)
+
+        # Symbols (arrows, dingbats) that the Nerd Font, CJK and emoji fonts all
+        # lack: DejaVu Sans Mono covers them at exactly one cell advance.
+        if sym_path and os.path.exists(sym_path):
+            bold = sym_path.replace("-Regular", "-Bold")
+            for style in STYLES:
+                src = bold if (style in ("bold", "bolditalic") and os.path.exists(bold)) else sym_path
+                self.faces[("sym", style)] = ImageFont.truetype(src, size)
 
         self.cache = {}
         self.width = {}
@@ -125,20 +137,34 @@ class Fallback:
         return s
 
     def pick(self, ch):
+        """First font that has the glyph *and* draws it one cell wide.
+
+        CJK fonts cover ▱ ♡ ─ and friends as full-width glyphs; picking them for
+        a narrow character spills into the next cell. Prefer the Nerd Font, then
+        the symbol font (DejaVu Sans Mono, 0.6 em advance), and only fall back to
+        CJK/emoji when nothing narrow is available.
+        """
         if ch in self.cache:
             return self.cache[ch]
         cp = ord(ch)
-        kind = "primary"
-        for cand in ("primary", "cjk", "emoji"):
-            for cm in self.chains[cand]:
-                if cp in cm:
-                    kind = cand
-                    break
-            else:
+        wide = is_wide(ch)
+        order = ("cjk", "primary", "sym", "emoji") if wide else ("primary", "sym", "cjk", "emoji")
+        first = None
+        for kind in order:
+            cms = self.chains.get(kind) or []
+            if not cms or cp not in cms[0]:
                 continue
-            break
-        self.cache[ch] = kind
-        return kind
+            if first is None:
+                first = kind
+            if wide or self._adv(kind, ch) <= self.cell * 1.15:
+                self.cache[ch] = kind
+                return kind
+        self.cache[ch] = first or "primary"
+        return self.cache[ch]
+
+    def _adv(self, kind, ch):
+        f = self.faces.get((kind, "")) or self.faces[("primary", "")]
+        return f.getlength(ch)
 
     def face(self, ch, style):
         kind = self.pick(ch)
@@ -150,6 +176,17 @@ class Fallback:
         if w is None:
             w = self.width[key] = self.face(ch, style).getlength(ch)
         return abs(w - self.cell) < 0.01
+
+    def cell_font(self, ch, style, cell_px):
+        f = self.face(ch, style)
+        w = f.getlength(ch) or 1
+        if w <= cell_px * 1.15:
+            return f
+        key = ("fit", ch, style, round(cell_px))
+        if key not in self.faces:
+            size = max(4, int(round(f.size * cell_px / w)))
+            self.faces[key] = ImageFont.truetype(self.paths.get(self.pick(ch), self.paths["primary"]), size)
+        return self.faces[key]
 
     def ascent(self, ch, style=""):
         return self.face(ch, style).getmetrics()[0]
@@ -197,6 +234,9 @@ def main():
     ap.add_argument("--font", default=os.path.expanduser(
         "~/.local/share/fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf"))
     ap.add_argument("--size", type=int, default=14)
+    ap.add_argument("--sym-font",
+                    default="/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                    help="symbol fallback (arrows/dingbats the other fonts lack)")
     ap.add_argument("--cjk-font", default=os.path.expanduser(
         "~/.local/share/fonts/NotoSansCJKsc-Regular.otf"))
     ap.add_argument("--emoji-font", default=os.path.expanduser(
@@ -204,6 +244,9 @@ def main():
     ap.add_argument("--theme", default="catppuccin")
     ap.add_argument("--scale", type=float, default=1.0)
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed multiplier")
+    ap.add_argument("--start", type=float, default=0.0,
+                    help="skip the first N seconds (events are replayed, not dropped)")
+    ap.add_argument("--end", type=float, default=0.0, help="stop at N seconds of cast time")
     ap.add_argument("--max-hold", type=float, default=0.0, help="clamp long static holds (seconds)")
     a = ap.parse_args()
 
@@ -217,7 +260,7 @@ def main():
 
     screen = Screen(cols, rows)
     stream = pyte.Stream(screen)
-    fonts = Fallback(a.font, a.size, a.cjk_font, a.emoji_font)
+    fonts = Fallback(a.font, a.size, a.cjk_font, a.emoji_font, a.sym_font)
     cw = fonts.faces[("primary", "")].getlength("M")
     asc, desc = fonts.faces[("primary", "")].getmetrics()
     ch = asc + desc
@@ -269,8 +312,10 @@ def main():
                         k += 1
                     if not seg:
                         # icon or odd glyph: place it on its own cell
-                        d.text((k * cw * s, y * ch * s), line[k].data,
-                               font=fonts.face(line[k].data, key), fill=fg)
+                        fnt = fonts.cell_font(line[k].data, key, cw * s)
+                        yoff = (asc - fnt.getmetrics()[0]) * s
+                        d.text((k * cw * s, y * ch * s + yoff), line[k].data,
+                               font=fnt, fill=fg)
                         k += 1
                         continue
                     fnt = fonts.face(seg[0], key)
@@ -282,11 +327,19 @@ def main():
         img.save(os.path.join(a.outdir, f"f{idx:05d}.png"))
 
     total = max(e[0] for e in events) + 1.0
+    if a.end and a.end < total:
+        total = a.end
     ei = 0
     idx = 0
     prev = None
     timeline = []
-    t = 0.0
+    # Everything before --start still has to be applied - a terminal screen is
+    # built incrementally - it just produces no frames.
+    t = max(0.0, a.start)
+    while ei < len(events) and events[ei][0] < t:
+        if events[ei][1] == "o":
+            stream.feed(events[ei][2])
+        ei += 1
     while t <= total:
         while ei < len(events) and events[ei][0] <= t:
             if events[ei][1] == "o":

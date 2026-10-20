@@ -8,7 +8,7 @@ for theme in "$@"; do
 	printf 'onboarding = false\n[ui.toast]\ndelivery = "terminal"\n[theme]\nname = "%s"\nauto_switch = false\n[ui]\nstatus_indicators = "symbols"\n' "$theme" >theme.toml
 	herdr session stop gifdemo >/dev/null 2>&1
 	herdr session delete gifdemo >/dev/null 2>&1
-	git -C work reset --hard -q
+	git -C work reset --hard -q "$(git -C work rev-list --max-parents=0 HEAD)"
 	git -C work clean -fdq
 	rm -f END refresh "take-$theme.cast"
 	echo "=== $theme: recording"

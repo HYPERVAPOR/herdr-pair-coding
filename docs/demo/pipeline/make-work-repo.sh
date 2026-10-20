@@ -23,6 +23,8 @@ def clamp(value, lo, hi):
     raise NotImplementedError
 EOF
 
+printf '' >"$WORK/tests/__init__.py"
+
 cat >"$WORK/tests/test_clamp.py" <<'EOF'
 import unittest
 
