@@ -1,8 +1,9 @@
 # Demo GIF pipeline
 
-`../pair-demo.gif` is a real 28-second session recorded from herdr, not a
-mock-up. This directory is the pipeline that produces it, kept so the demo can
-be re-recorded or re-rendered later.
+`../pair-demo.gif` is a 12-second cut of a real session recorded from herdr,
+not a mock-up (the untrimmed 46-second take is
+`casts/pair-demo-catppuccin.cast`). This directory is the pipeline that produces
+it, kept so the demo can be re-recorded or re-rendered later.
 
 ```
 pipeline/record.py           pty -> asciinema v2 cast          (stdlib only)

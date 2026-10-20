@@ -10,9 +10,11 @@ pane.
 
 ![A real session: worker and reviewer in one tab, the watchdog's telemetry pane bottom-right, two idle pairs in other tabs](docs/pair-demo.gif)
 
-The GIF is a real recorded session, not a mock-up. The recording pipeline
-(pty capture -> cast -> frames -> GIF), the raw cast and the theme stills live in
-[`docs/demo`](docs/demo/README.md).
+It is a 12-second cut of a real session, not a mock-up: the worker implements a
+stub and runs the tests, then the human prompts the reviewer, which unblocks its
+heartbeat (`hb_block:true -> false`, visible in the top pane) and signs off. The
+recording pipeline (pty capture -> cast -> frames -> GIF), the untrimmed cast and
+the theme stills live in [`docs/demo`](docs/demo/README.md).
 
 ## Set up with your agent
 
