@@ -8,6 +8,12 @@ pane.
 
 ![Three worker–reviewer pairs, each with its own worktree, watched by one watchdog](docs/pair-loop.png)
 
+![A real session: worker and reviewer in one tab, the watchdog's telemetry pane bottom-right, two idle pairs in other tabs](docs/pair-demo.gif)
+
+The GIF is a real recorded session, not a mock-up. The recording pipeline
+(pty capture -> cast -> frames -> GIF), the raw cast and the theme stills live in
+[`docs/demo`](docs/demo/README.md).
+
 ## Set up with your agent
 
 ```text
