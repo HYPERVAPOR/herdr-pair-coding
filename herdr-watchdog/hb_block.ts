@@ -125,11 +125,19 @@ function indicator(tuiInjected, theme) {
   });
 }
 
-const DESCRIPTION = `Block or restore the heartbeat watchdog for "you and the worker next to you". Call it only at two moments, never continuously:
-- action=block: (1) you are starting a long task (e2e, several minutes) that the watchdog would misread as stuck; (2) you are talking to a human; (3) you finished this round or are waiting for a decision. reason is one sentence (max 120 chars) saying what you are waiting for; longer values are truncated, not rejected.
-- action=unblock: back to pair coding with the worker.
+const DESCRIPTION = `The reviewer's switch for the watchdog that keeps you and the worker in sync: your side of that coordination runs entirely on the heartbeats it sends you.
 
-After block, the watchdog stops disturbing this pair. Forgetting to unblock mutes the pair permanently; nothing flips it back for you. Unblock as soon as the long task finishes, the conversation ends, or the decision is made. A repeated call with the same value is a safe no-op.`;
+It is an atomic set, not a toggle: you declare the state you want and never need to remember the one before. Setting the state it already has is a no-op, so calling it often, even every turn, costs nothing; only the direction has to be right.
+
+action=block   stop the heartbeats — you do not need the worker right now.
+action=unblock receive them again — you do need the worker.
+
+What getting it wrong costs:
+- forgetting unblock (the common one): the watchdog never calls you again. You are stalled until a human wakes you.
+- forgetting block: it interrupts you; one interruption usually reminds you, so this rarely costs anything.
+- worst: declaring block while you do need the worker — a human unblocks you by hand, and you block again.
+
+The latch is per tab and outlives turns and restarts: nothing except you or a human turns it off.`;
 
 export default function (pi) {
   pi.on("session_start", async (_event, ctx) => {
@@ -177,11 +185,11 @@ export default function (pi) {
     description: DESCRIPTION,
     parameters: Type.Object({
       action: Type.Union([Type.Literal("block"), Type.Literal("unblock")], {
-        description: "block = do not disturb (long task / talking to a human / waiting for a decision); unblock = back to pair coding",
+        description: "block = stop the watchdog's heartbeats (you do not need the worker right now); unblock = receive them again (you do need the worker)",
       }),
       reason: Type.String({
         maxLength: 200,   // loose gate: never reject an action for length (the CLI truncates past 120 chars with "…")
-        description: "One sentence (max 120 chars) saying what you are waiting for; shown in history, e.g. \"20-minute e2e\" or \"done\"",
+        description: "One sentence on what you are doing instead, shown to the human and kept in the history, e.g. \"running the e2e, 10 min\" or \"waiting on a human decision\"",
       }),
     }),
     async execute(_toolCallId, params) {
