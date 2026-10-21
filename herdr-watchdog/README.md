@@ -43,7 +43,9 @@ Repeated calls are no-ops. History keeps the last ~20 entries. Flag file:
 `~/.herdr/watchdog/<session>__<tab>.json`.
 
 The reviewer's indicator line shows `hb_block:true 😴` or `hb_block:false 👂`.
-Double-click it to toggle (fullscreen mode only), or run `/hb`.
+`/hb` toggles it from the keyboard and always works. Double-clicking the
+indicator works only where the host forwards mouse events to the pane: herdr
+captures mouse input for its own UI by default.
 
 ## Ops
 

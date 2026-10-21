@@ -10,7 +10,9 @@
  * the file format); this file only forwards.
  *
  * Humans get the same switch two other ways, both also through that CLI:
- * double-clicking the indicator widget, and the /hb command.
+ * double-clicking the indicator widget (only where the host forwards mouse
+ * events to the pane; herdr keeps them for its own UI by default), and /hb,
+ * which always works.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
@@ -46,17 +48,22 @@ function render() {
 }
 
 function refreshStatus() {
-  let cur;
-  try {
-    cur = execFileSync("python3", [CLI, "get"], { encoding: "utf8", timeout: 5000 }).trim();
-  } catch {
-    return;   // If the read fails, keep the old value rather than show a fake false.
-  }
-  blocked = cur === "true";
+  const cur = readFlag();
+  if (cur === null) return;   // unreadable: keep the old value rather than show a fake false
+  blocked = cur;
   tick = 0;
   render();
   // No UI (print/RPC) still needs `blocked` for /hb; the animation is pointless there.
   if (ui && !timer) timer = setInterval(() => { tick = (tick + 1) % 4; render(); }, ANIM_MS);
+}
+
+// -> true/false, or null when the read fails.
+function readFlag() {
+  try {
+    return execFileSync("python3", [CLI, "get"], { encoding: "utf8", timeout: 5000 }).trim() === "true";
+  } catch {
+    return null;
+  }
 }
 
 // The one write path. Throws on failure (the CLI exiting non-zero), so callers
@@ -75,6 +82,14 @@ function oneLine(e) {
   return msg.length > 76 ? msg.slice(0, 75) + "…" : msg;
 }
 
+// Flip the flag. Re-reads it first: anything else can write it through the same
+// CLI (`herdr-watchdog set --session/--tab`), so the cached value may be stale.
+function toggle(reason) {
+  const cur = readFlag();
+  if (cur !== null) blocked = cur;
+  return setFlag(blocked ? "unblock" : "block", reason);
+}
+
 // Widget factory: MouseRegion around the one-line indicator. setStatus is
 // string-only, so the indicator cannot live in the status row any more.
 function indicator(tuiInjected, theme) {
@@ -86,15 +101,21 @@ function indicator(tuiInjected, theme) {
     invalidate() {},
   };
   const region = new MouseRegion(face, (event) => {
+    // The alt screen synthesises a click only for a component that claimed the
+    // preceding press (tui-alt-screen.js: mousePressTarget is set from a truthy
+    // press result), so claim the left press before looking at clicks.
+    if (event.type === "press" && event.button === "left") return { handled: true };
     if (event.type !== "click" || event.button !== "left") return undefined;   // right/middle click: ignore
-    // A single click does nothing: hb_block is a latch nothing resets, so an
-    // accidental click must not mute a pair. Only a double click toggles.
-    if ((event.clickCount ?? 1) < 2) return { handled: true };
+    // Exactly a double click. clickCount wraps 1,2,3,1, so "< 2" would toggle
+    // twice on a fast triple click. Single click stays a no-op on purpose:
+    // hb_block is a latch nothing resets, so an accident must not mute a pair.
+    if (event.clickCount !== 2) return { handled: true };
     try {
-      setFlag(blocked ? "unblock" : "block", CLICK_REASON);
-    } catch {
-      // A click cannot report an error anywhere useful; refreshStatus() below
-      // keeps the indicator honest either way.
+      toggle(CLICK_REASON);
+    } catch (e) {
+      // A click must not throw into the renderer, and it has nowhere else to
+      // report: say it in the UI, then let refreshStatus() keep the value honest.
+      ui?.notify?.(oneLine(e), "warning");
     }
     refreshStatus();
     return { handled: true };
@@ -137,11 +158,11 @@ export default function (pi) {
         ctx.ui?.notify(USAGE, "warning");
         return;
       }
-      const action = verb || (blocked ? "unblock" : "block");
+      const action = verb || null;
       const reason = rest.join(" ").trim() || (verb ? `manual (/hb ${verb})` : "manual toggle (/hb)");
       let line;
       try {
-        line = setFlag(action, reason);
+        line = action ? setFlag(action, reason) : toggle(reason);
       } catch (e) {
         line = oneLine(e);
       }

@@ -17,6 +17,8 @@ const jiti = createJiti(import.meta.url, {
     "@earendil-works/pi-tui": path.join(PI_ROOT, "@earendil-works/pi-tui/dist/index.js"),
   },
 });
+const TUI = await import(path.join(PI_ROOT, "@earendil-works/pi-tui/dist/index.js"));
+const { TuiAltScreen } = await import(path.join(PI_ROOT, "@earendil-works/pi-tui/dist/tui-alt-screen.js"));
 
 let fail = 0;
 const check = (n, c, extra = "") => { console.log((c ? "PASS  " : "FAIL  ") + n + (!c && extra ? "   <- " + String(extra).slice(0, 300) : "")); if (!c) fail++; };
@@ -58,9 +60,10 @@ const command = calls.commands[0]?.opts?.handler;
 // --- the widget: value first, double click toggles, single click does not ---
 await calls.handlers.session_start({}, { hasUI: true, ui: uiStub });
 check("sets the indicator as a widget", calls.widgets.length === 1 && calls.widgets[0].key === "hb_block", JSON.stringify(calls.widgets.map((w) => w.key)));
+const factory = calls.widgets[0].factory;
 
 const tuiStub = { requestRender: () => {} };
-const widget = calls.widgets[0].factory(tuiStub, theme);
+const widget = factory(tuiStub, theme);
 const line = () => widget.render(80).join("\n");
 check("the widget renders the value first", line().startsWith("hb_block:"), JSON.stringify(line()));
 const click = (clickCount, button = "left", type = "click") => ({ type, button, clickCount });
@@ -75,6 +78,8 @@ check("a double click blocks", flag() === "true", flag());
 check("the indicator follows the double click", line().startsWith("hb_block:true"), JSON.stringify(line()));
 widget.handleMouse(click(2));
 check("a second double click unblocks", flag() === "false", flag());
+widget.handleMouse(click(3));
+check("a triple click is ignored, not a second toggle", flag() === "false", flag());
 widget.handleMouse({ ...click(2), button: "right" });
 check("a right double click is ignored", flag() === "false", flag());
 widget.handleMouse({ ...click(2), button: "middle" });
@@ -130,6 +135,94 @@ calls.notes.length = 0;
 threw = null;
 try { await command("", { ui: undefined }); } catch (e) { threw = e; }
 check("/hb toggles back without a UI", threw === null && flag() === "false", flag());
+
+// --- routing through the real TuiAltScreen, not hand-made events ---
+// pi-tui only synthesises a click for a component that claimed the preceding
+// press, so a handler that ignores presses leaves the feature dead in the real
+// app even when the click logic itself is right. This block drives press/release
+// pairs through the framework and watches the flag file.
+function mount() {
+  const term = { columns: 60, rows: 14, write() {}, start() {}, stop() {}, setTitle() {} };
+  const tui = new TuiAltScreen(term, false, undefined);
+  const seen = [];
+  const recorder = new TUI.MouseRegion({ render: () => ["rec:" + seen.at(-1)], invalidate() {} }, (e) => {
+    if (e.type === "press" && e.button === "left") return { handled: true };
+    if (e.type === "click") seen.push("click" + e.clickCount);
+    return { handled: true };
+  });
+  const indicator = factory(tui, theme);
+  const widgets = new TUI.Container();
+  widgets.addChild(new TUI.Spacer(1));
+  widgets.addChild(indicator);
+  widgets.addChild(recorder);
+  const editor = { render: () => [" editor ", " ", " "], invalidate() {} };
+  const dock = new TUI.VStack([
+    { component: widgets, shrink: 1, minSize: 0 },
+    { component: editor, shrink: 1, minSize: 3 },
+  ]);
+  const root = new TUI.VStack([
+    { component: { render: () => Array(6).fill(" transcript "), invalidate() {} }, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+    { component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+  ]);
+  tui.setLayoutRoot(root);
+  tui.altScreenActive = true;
+  tui.doRender();
+  return {
+    tui,
+    seen,
+    indicator,
+    recorder,
+    // Screen row of a mounted component: hit-test without side effects (a
+    // dispatchMouseToLayout press never becomes a click).
+    rowOf: (component) => {
+      for (let y = 0; y < 14; y++) {
+        const hit = tui.dispatchMouseToLayout({ type: "press", button: "left", x: 2, y, screenX: 2, screenY: y, width: 60, height: 14 });
+        if (hit?.target?.component === component) return y;
+      }
+      return -1;
+    },
+    pair: (y) => {
+      tui.handleMouseEvent({ x: 2, y, button: 0, release: false });
+      tui.handleMouseEvent({ x: 2, y, button: 0, release: true });
+    },
+  };
+}
+
+// history length in a throwaway flag dir: one entry per real write.
+const entries = (dir) => {
+  const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
+  if (!files.length) return 0;
+  return (JSON.parse(fs.readFileSync(path.join(dir, files[0]), "utf8")).history || []).length;
+};
+
+await calls.handlers.session_start({}, { hasUI: true, ui: uiStub });
+const routeDir = fs.mkdtempSync(path.join(os.tmpdir(), "hb-route-"));
+process.env.HB_DIR = routeDir;
+
+const h = mount();
+const yRec = h.rowOf(h.recorder);
+h.pair(yRec);
+h.pair(yRec);
+check("the TUI really synthesises clicks for a claimed press", h.seen.join(",") === "click1,click2", h.seen.join(","));
+
+const yWidget = h.rowOf(h.indicator);
+check("the indicator answers a press on its screen row", yWidget >= 0, String(yWidget));
+h.pair(yWidget);
+check("one press+release does not flip the flag", flag() === "false" && entries(routeDir) === 0, `${flag()} entries=${entries(routeDir)}`);
+h.pair(yWidget);
+check("two pairs within 500 ms flip it once", flag() === "true" && entries(routeDir) === 1, `${flag()} entries=${entries(routeDir)}`);
+
+const routeDir3 = fs.mkdtempSync(path.join(os.tmpdir(), "hb-route3-"));
+process.env.HB_DIR = routeDir3;
+const h3 = mount();
+const y3 = h3.rowOf(h3.indicator);
+h3.pair(y3);
+h3.pair(y3);
+h3.pair(y3);
+check("a third pair adds no second toggle", entries(routeDir3) === 1, `${entries(routeDir3)} entries`);
+fs.rmSync(routeDir, { recursive: true, force: true });
+fs.rmSync(routeDir3, { recursive: true, force: true });
+process.env.HB_DIR = tmp;
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fail ? `\n${fail} failed` : "\nall passed");
