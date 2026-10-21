@@ -1,0 +1,14 @@
+{
+  "name": "herdr-pair-coding",
+  "description": "A worker-reviewer pair-coding setup for pi on top of herdr.",
+  "owner": {
+    "name": "HYPERVAPOR"
+  },
+  "plugins": [
+    {
+      "name": "herdr-pair-coding",
+      "source": "./",
+      "description": "A worker-reviewer pair-coding setup for pi on top of herdr."
+    }
+  ]
+}
