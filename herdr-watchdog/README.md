@@ -42,7 +42,8 @@ The reviewer gets one tool:
 Repeated calls are no-ops. History keeps the last ~20 entries. Flag file:
 `~/.herdr/watchdog/<session>__<tab>.json`.
 
-The reviewer status bar shows `hb_block:true 😴` or `hb_block:false 👂`.
+The reviewer's indicator line shows `hb_block:true 😴` or `hb_block:false 👂`.
+Double-click it to toggle (fullscreen mode only), or run `/hb`.
 
 ## Ops
 
