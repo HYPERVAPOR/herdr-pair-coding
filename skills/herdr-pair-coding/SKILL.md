@@ -317,6 +317,9 @@ per pane, `None` meaning bare pi. A restored profile pane has
 - Watchdog cannot find `herdr` under systemd: `PATH` in the unit (C.3).
 - `refs-reclaim apply` refuses on macOS: its in-use scan reads `/proc`, so it
   fails closed. `plan`/`archive` still work; `--force-unsafe` is not recommended.
+- Double-clicking the indicator does nothing: mouse input only reaches components
+  in fullscreen mode, and herdr captures it for its own UI by default; `/hb`
+  always works.
 - Outside herdr the CLIs need the session: `HERDR_SESSION=<name>` (and for
   `herdr` itself `--session <name>`), because a live `HERDR_SOCKET_PATH` wins.
 
@@ -325,7 +328,7 @@ per pane, `None` meaning bare pi. A restored profile pane has
 | what | command |
 | --- | --- |
 | worker's last answer | `herdr-last-answer <worker>` (tool `last_answer`) |
-| silence the heartbeat | `herdr-watchdog set --action block --reason "..."` (tool `hb_block`) |
+| silence the heartbeat | `herdr-watchdog set --action block --reason "..."` (tool `hb_block`; you: `/hb`, always; double-click the indicator where the host forwards mouse events) |
 | what would the watchdog do | `herdr-watchdog run --dry-run` |
 | live view / pid | `herdr-watchdog top` |
 | pause everything | `~/.herdr/watchdog/PAUSE` |
