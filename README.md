@@ -32,7 +32,7 @@ Claude Code, from this repo's own marketplace:
 /plugin install herdr-pair-coding@herdr-pair-coding
 ```
 
-No agent at all: paste this into your agent, or read it yourself.
+No installer involved: read the SKILL.md yourself, or paste the line below into any agent.
 
 ```text
 Help me set up herdr-pair-coding: https://raw.githubusercontent.com/HYPERVAPOR/herdr-pair-coding/main/skills/herdr-pair-coding/SKILL.md
