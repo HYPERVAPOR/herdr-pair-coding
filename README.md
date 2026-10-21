@@ -1,5 +1,7 @@
 # herdr-pair-coding
 
+[![skills.sh](https://skills.sh/b/HYPERVAPOR/herdr-pair-coding)](https://skills.sh/HYPERVAPOR/herdr-pair-coding)
+
 Linux and macOS (Windows via WSL). Worker–reviewer pair coding on top of
 [herdr](https://herdr.dev): one agent writes, another reviews, each in its own
 pane.
@@ -16,7 +18,23 @@ heartbeat (`hb_block:true -> false`, visible in the top pane) and signs off. The
 recording pipeline (pty capture -> cast -> frames -> GIF), the untrimmed cast and
 the theme stills live in [`docs/demo`](docs/demo/README.md).
 
-## Set up with your agent
+## Install
+
+Any agent that reads `SKILL.md` files (Claude Code, Codex, Cursor, ...) via
+[skills.sh](https://skills.sh):
+
+```bash
+npx skills add HYPERVAPOR/herdr-pair-coding --skill herdr-pair-coding
+```
+
+Claude Code, from this repo's own marketplace:
+
+```text
+/plugin marketplace add HYPERVAPOR/herdr-pair-coding
+/plugin install herdr-pair-coding@herdr-pair-coding
+```
+
+No agent at all: paste this into your agent, or read it yourself.
 
 ```text
 Help me set up herdr-pair-coding: https://raw.githubusercontent.com/HYPERVAPOR/herdr-pair-coding/main/skills/herdr-pair-coding/SKILL.md

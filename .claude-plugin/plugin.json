@@ -1,0 +1,12 @@
+{
+  "name": "herdr-pair-coding",
+  "version": "0.1.0",
+  "description": "A worker-reviewer pair-coding setup for pi on top of herdr.",
+  "author": {
+    "name": "HYPERVAPOR"
+  },
+  "license": "MIT",
+  "skills": [
+    "./skills"
+  ]
+}

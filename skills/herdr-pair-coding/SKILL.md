@@ -1,6 +1,7 @@
 ---
 name: herdr-pair-coding
 description: "Set up or operate herdr-pair-coding: worker-reviewer pair coding on top of herdr."
+license: MIT
 ---
 
 # herdr-pair-coding
