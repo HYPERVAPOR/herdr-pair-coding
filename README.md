@@ -1,7 +1,5 @@
 # herdr-pair-coding
 
-[![skills.sh](https://skills.sh/b/HYPERVAPOR/herdr-pair-coding)](https://skills.sh/HYPERVAPOR/herdr-pair-coding)
-
 Linux and macOS (Windows via WSL). Worker–reviewer pair coding on top of
 [herdr](https://herdr.dev): one agent writes, another reviews, each in its own
 pane.
