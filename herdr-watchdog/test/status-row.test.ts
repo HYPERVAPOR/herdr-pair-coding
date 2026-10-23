@@ -86,12 +86,12 @@ const stubPart = (label, hits, columns) => () => {
   S.joinStatusRow(ui, "cerberus", stubPart("cerberus:capture", hits), TUI);
   check("a second join does not re-set the widget", ui.calls.length === 1, String(ui.calls.length));
   check("it repaints through the remembered tui", t.renders === 1, String(t.renders));
-  check("parts render in join order", plain(row.render(120)[0]) === "hb_block:truecerberus:capture", JSON.stringify(row.render(120).map(plain)));
+  check("parts render in join order", plain(row.render(120)[0]) === "hb_block:true  cerberus:capture", JSON.stringify(row.render(120).map(plain)));
 
   S.joinStatusRow(ui, "third", stubPart("third", hits), TUI);
   S.leaveStatusRow(ui, "cerberus");
   check("a middle leave keeps the others without re-setting", ui.calls.length === 1, String(ui.calls.length));
-  check("the middle part is gone", plain(row.render(120)[0]) === "hb_block:truethird", JSON.stringify(row.render(120).map(plain)));
+  check("the middle part is gone", plain(row.render(120)[0]) === "hb_block:true  third", JSON.stringify(row.render(120).map(plain)));
 
   S.leaveStatusRow(ui, "hb_block");
   S.leaveStatusRow(ui, "third");
@@ -111,18 +111,41 @@ const stubPart = (label, hits, columns) => () => {
   S.joinStatusRow(ui, "right", stubPart("0123456789abcdef", hits, 16), TUI);  // 16 columns
   const row = ui.calls[0].content(tuiStub(), theme);
   const line = plain(row.render(80)[0]);
-  check("the two parts share one line", line.startsWith("0123456789abc0123456789abcdef"), JSON.stringify(line));
+  check("the two parts share one line", line.startsWith("0123456789abc  0123456789abcdef"), JSON.stringify(line));
+  check("exactly two columns of gap", line.slice(13, 15) === "  " && line[15] === "0", JSON.stringify(line.slice(10, 18)));
 
   const click = (x) => ({ type: "click", button: "left", clickCount: 2, x, y: 0, width: 80, height: 1, screenX: x, screenY: 0, shift: false, alt: false, ctrl: false });
   row.handleMouse(click(12));
   check("x=12 goes to the left part", hits.at(-1) === "0123456789abc@12", JSON.stringify(hits));
   row.handleMouse(click(13));
-  check("x=13 goes to the right part", hits.at(-1) === "0123456789abcdef@0", JSON.stringify(hits));
+  row.handleMouse(click(14));
+  check("x=13 and x=14 are the gap: nobody's", hits.length === 1, JSON.stringify(hits));
+  row.handleMouse(click(15));
+  check("x=15 goes to the right part", hits.at(-1) === "0123456789abcdef@0", JSON.stringify(hits));
   check("and with a relative x of 0", hits.at(-1).endsWith("@0"), JSON.stringify(hits.at(-1)));
   row.handleMouse(click(190));
   check("x=190 reaches neither part", hits.length === 2, JSON.stringify(hits));
   S.leaveStatusRow(ui, "left");
   S.leaveStatusRow(ui, "right");
+}
+
+// --- the gap is exactly two columns, only between parts ------------------
+// The same three labels are asserted in pi-utils' copy, so the two implementations
+// are pinned to the same composed line.
+{
+  reset();
+  const ui = fakeUi();
+  const label = (text) => () => ({ render: () => [text], invalidate() {} });
+  for (const [id, text] of [["a", "aaa"], ["b", "bbb"], ["c", "ccc"]]) {
+    S.joinStatusRow(ui, id, label(text), TUI);
+  }
+  const row = ui.calls[0].content(tuiStub(), theme);
+  check("three parts, two spaces between each", plain(row.render(200)[0]) === "aaa  bbb  ccc", JSON.stringify(plain(row.render(200)[0])));
+
+  S.leaveStatusRow(ui, "b");
+  S.leaveStatusRow(ui, "c");
+  check("a lone part gets no padding", plain(row.render(200)[0]) === "aaa", JSON.stringify(plain(row.render(200)[0])));
+  S.leaveStatusRow(ui, "a");
 }
 
 // --- 3. an existing registry is reused, not replaced ----------------------

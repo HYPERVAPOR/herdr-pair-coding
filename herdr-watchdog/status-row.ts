@@ -24,6 +24,9 @@ import * as TUI from "@earendil-works/pi-tui";
 /** The widget key every participant uses - one key, one line. */
 export const ROW_KEY = "status-row";
 
+/** Blank columns between two parts, so two labels never read as one word. */
+export const PART_GAP = 2;
+
 /** A part's component factory: the same shape as a `setWidget` factory. */
 // type Part = (tui, theme) => Component
 
@@ -60,8 +63,9 @@ function buildRegistry(tuiApi) {
       // One HStack for the life of the widget, refilled on every render: a part that
       // joins later (or leaves) shows up on the next frame, without re-setting the
       // widget. `render(width)` returns the lines `Container` would, so pi's layout
-      // engine owns the horizontal allocation.
-      const stack = new tuiApi.HStack([]);
+      // engine owns the horizontal allocation. `gap` puts PART_GAP columns *between*
+      // parts only - `HStack` never pads the ends.
+      const stack = new tuiApi.HStack([], { gap: PART_GAP });
       let children = [];
       return {
         render(width) {
@@ -77,7 +81,7 @@ function buildRegistry(tuiApi) {
         // horizontal stack would hand every click to the first part.
         handleMouse(event) {
           let start = 0;
-          for (const child of children) {
+          for (const [index, child] of children.entries()) {
             // The width `HStack` gives this child when the parts fit - which is every
             // terminal wide enough to show two short labels on one line.
             const width = child
@@ -86,7 +90,8 @@ function buildRegistry(tuiApi) {
             if (event.x >= start && event.x < start + width) {
               return child.handleMouse?.({ ...event, x: event.x - start });
             }
-            start += width;
+            // The gap belongs to nobody: a click in it reaches no part.
+            start += width + (index === children.length - 1 ? 0 : PART_GAP);
           }
           return undefined;
         },
