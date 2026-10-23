@@ -59,14 +59,20 @@ const command = calls.commands[0]?.opts?.handler;
 
 // --- the widget: value first, double click toggles, single click does not ---
 await calls.handlers.session_start({}, { hasUI: true, ui: uiStub });
-check("sets the indicator as a widget", calls.widgets.length === 1 && calls.widgets[0].key === "hb_block", JSON.stringify(calls.widgets.map((w) => w.key)));
+// The indicator joins the shared status row ("status-row" key) when pi-tui can lay
+// parts out side by side, and keeps its own "hb_block" widget when it cannot.
+check("sets the indicator as a widget", calls.widgets.length === 1 && ["status-row", "hb_block"].includes(calls.widgets[0].key), JSON.stringify(calls.widgets.map((w) => w.key)));
 const factory = calls.widgets[0].factory;
 
 const tuiStub = { requestRender: () => {} };
 const widget = factory(tuiStub, theme);
-const line = () => widget.render(80).join("\n");
+// HStack marks segment boundaries with resets; the visible text is what matters.
+const line = () => widget.render(80).join("\n").replace(/\x1B\[[0-9;]*m/g, "").replace(/\x1B\]8;;\x07/g, "");
 check("the widget renders the value first", line().startsWith("hb_block:"), JSON.stringify(line()));
-const click = (clickCount, button = "left", type = "click") => ({ type, button, clickCount });
+// x/width are the row's routing inputs: hb_block owns the first columns of it.
+const click = (clickCount, button = "left", type = "click") => ({
+  type, button, clickCount, x: 2, y: 0, width: 80, height: 1, screenX: 2, screenY: 0, shift: false, alt: false, ctrl: false,
+});
 
 // No flag file yet -> false.
 check("no flag reads as false", flag() === "false", flag());

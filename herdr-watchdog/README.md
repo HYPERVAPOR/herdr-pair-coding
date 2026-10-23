@@ -47,6 +47,11 @@ The reviewer's indicator line shows `hb_block:true 😴` or `hb_block:false 👂
 indicator works only where the host forwards mouse events to the pane: herdr
 captures mouse input for its own UI by default.
 
+The indicator shares one status line with other pi plugins that speak the same
+contract (`herdr-watchdog/status-row.ts`, a copy of `pi-utils`' version 1): one
+widget key, parts side by side, each keeping its own clicks. Without `HStack` in
+pi-tui it falls back to a line of its own, which is what it always was.
+
 ## Ops
 
 - State: `~/.herdr/watchdog/`.
