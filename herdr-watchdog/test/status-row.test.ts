@@ -99,7 +99,7 @@ const stubPart = (label, hits, columns) => () => {
   S.leaveStatusRow(ui, "third");
   S.leaveStatusRow(ui, "never-joined");
   check("repeated and unknown leaves are no-ops", ui.calls.length === 2, String(ui.calls.length));
-  check("the registry is left empty, not dropped", globalThis[GLOBAL_KEY]?.parts.size === 0, String(globalThis[GLOBAL_KEY]?.parts.size));
+  check("the registry is dropped, so a reload starts clean", globalThis[GLOBAL_KEY] === undefined, JSON.stringify(globalThis[GLOBAL_KEY]));
 }
 
 // --- 2. clicks route by column, not by row --------------------------------
@@ -154,18 +154,75 @@ const stubPart = (label, hits, columns) => () => {
   const theirs = { render: () => ({ render: () => ["theirs"], invalidate() {} }) };
   globalThis[GLOBAL_KEY] = {
     version: 1,
-    parts: new Map([["cerberus", () => ({ render: () => ["cerberus:capture"], invalidate() {} })]]),
+    // A peer that is already on this composition: nothing to upgrade, nothing to set.
+    renderVersion: 2,
+    parts: new Map([["cerberus", () => ({ render: () => ["cerberus:on"], invalidate() {} })]]),
     widgetSet: true,
     render: theirs.render,
   };
   const parts = globalThis[GLOBAL_KEY].parts;
   S.joinStatusRow(ui, "hb_block", stubPart("hb_block:false", []), TUI);
-  check("no second setWidget for a registry someone else owns", ui.calls.length === 0, JSON.stringify(ui.calls.map((c) => c.key)));
+  check("no second setWidget for a current registry someone else owns", ui.calls.length === 0, JSON.stringify(ui.calls.map((c) => c.key)));
   check("their render is untouched", globalThis[GLOBAL_KEY].render === theirs.render);
   check("their part is kept and ours is added", [...parts.keys()].join(",") === "cerberus,hb_block", [...parts.keys()].join(","));
   S.leaveStatusRow(ui, "hb_block");
   S.leaveStatusRow(ui, "cerberus");
   check("the last leave still clears the shared widget", ui.calls.at(-1)?.key === "status-row" && ui.calls.at(-1)?.content === undefined, JSON.stringify(ui.calls.map((c) => c.key)));
+}
+
+// --- a registry left over by an older build is upgraded, not trusted -----
+// `/reload` rebuilds the extension but `globalThis.__piStatusRow` - and the render the
+// widget holds - are the old build's. Before this, the new gap code never ran.
+{
+  reset();
+  const ui = fakeUi();
+  const hits = [];
+  const staleRender = () => ({ render: () => ["hb_block:truecerberus:on"], invalidate() {} });
+  const parts = new Map([["cerberus", stubPart("cerberus:on", hits)]]);
+  globalThis[GLOBAL_KEY] = { version: 1, parts, widgetSet: true, render: staleRender };
+
+  S.joinStatusRow(ui, "hb_block", stubPart("hb_block:true", hits), TUI);
+  const row = globalThis[GLOBAL_KEY];
+  check("the widget is re-set so it drops the old render", ui.calls.length === 1 && ui.calls[0].key === "status-row", JSON.stringify(ui.calls.map((c) => c.key)));
+  check("with the new render", ui.calls[0]?.content === row.render);
+  check("the registry field itself was replaced", row.render !== staleRender);
+  check("and says which composition it has", row.renderVersion === 2, String(row.renderVersion));
+  check("the shape version is untouched", row.version === 1, String(row.version));
+  check("the foreign part is kept", [...row.parts.keys()].join(",") === "cerberus,hb_block", [...row.parts.keys()].join(","));
+
+  const upgraded = ui.calls[0].content(tuiStub(), theme);
+  check("the gap is in effect", plain(upgraded.render(200)[0]) === "cerberus:on  hb_block:true", JSON.stringify(plain(upgraded.render(200)[0])));
+
+  S.joinStatusRow(ui, "third", stubPart("third", hits), TUI);
+  check("no further setWidget once the composition is current", ui.calls.length === 1, String(ui.calls.length));
+  S.leaveStatusRow(ui, "cerberus");
+  S.leaveStatusRow(ui, "hb_block");
+  S.leaveStatusRow(ui, "third");
+  check("leaving empties it out completely", globalThis[GLOBAL_KEY] === undefined);
+}
+
+// --- the reload path: nothing left behind means the new code builds it ---
+{
+  reset();
+  const ui = fakeUi();
+  const hits = [];
+  S.joinStatusRow(ui, "a", stubPart("aaa", hits), TUI);
+  S.joinStatusRow(ui, "b", stubPart("bbb", hits), TUI);
+  const before = ui.calls[0].content(tuiStub(), theme);
+  check("two parts, one line with the gap", plain(before.render(200)[0]) === "aaa  bbb", JSON.stringify(plain(before.render(200)[0])));
+  S.leaveStatusRow(ui, "a");
+  S.leaveStatusRow(ui, "b");
+  check("the registry does not outlive its last part", globalThis[GLOBAL_KEY] === undefined);
+
+  // A reload: the next join builds a fresh registry with the current composition.
+  ui.calls.length = 0;
+  S.joinStatusRow(ui, "a", stubPart("aaa", hits), TUI);
+  S.joinStatusRow(ui, "b", stubPart("bbb", hits), TUI);
+  const after = ui.calls[0].content(tuiStub(), theme);
+  check("the gap survives the restart", plain(after.render(200)[0]) === "aaa  bbb", JSON.stringify(plain(after.render(200)[0])));
+  check("the fresh registry is current", globalThis[GLOBAL_KEY].renderVersion === 2, String(globalThis[GLOBAL_KEY].renderVersion));
+  S.leaveStatusRow(ui, "a");
+  S.leaveStatusRow(ui, "b");
 }
 
 // --- 4. no HStack: refuse, and create nothing ----------------------------
@@ -213,7 +270,7 @@ const mountHb = async (instance = jiti) => {
   check("the line shows the indicator", line.startsWith("hb_block:"), JSON.stringify(line));
 
   state.handlers.session_shutdown();
-  check("shutdown removes the part", globalThis[GLOBAL_KEY].parts.size === 0, String(globalThis[GLOBAL_KEY].parts.size));
+  check("shutdown removes the part and the registry", globalThis[GLOBAL_KEY] === undefined, JSON.stringify(globalThis[GLOBAL_KEY]?.parts ? [...globalThis[GLOBAL_KEY].parts.keys()] : null));
   check("and clears the shared widget exactly once", state.widgets.at(-1).key === "status-row" && state.widgets.at(-1).factory === undefined, JSON.stringify(state.widgets.map((w) => w.key)));
   const before = state.widgets.length;
   state.handlers.session_shutdown();
