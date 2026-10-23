@@ -19,6 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MouseRegion } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { joinStatusRow, leaveStatusRow } from "./status-row.ts";
 
 // Same directory as this extension (herdr-watchdog/ in this repo), so the CLI
 // is found no matter where the extension is loaded from.
@@ -39,6 +40,7 @@ const CLICK_REASON = "manual toggle (double-click)";
 const USAGE = "usage: /hb | /hb block <reason> | /hb unblock";
 let ui = null;
 let tui = null;   // handed to the widget factory; only used to request renders
+let shared = false;   // true when the indicator is a part of the shared status row
 let blocked = false;
 let tick = 0;
 let timer = null;
@@ -142,7 +144,19 @@ The latch is per tab and outlives turns and restarts: nothing except you or a hu
 export default function (pi) {
   pi.on("session_start", async (_event, ctx) => {
     ui = ctx.hasUI ? ctx.ui : null;
-    if (ui) ui.setWidget(WIDGET_KEY, indicator);   // no mouse events in regular mode; /hb still works
+    if (ui) {
+      // One line with the other plugins that speak the same contract
+      // (herdr-watchdog/status-row.ts). Anything that keeps us out of it - an older
+      // pi-tui without HStack, or a setWidget that refuses - puts the indicator on a
+      // line of its own, exactly as before. No mouse events in regular mode; /hb
+      // still works either way.
+      try {
+        joinStatusRow(ui, WIDGET_KEY, indicator);
+        shared = true;
+      } catch {
+        ui.setWidget(WIDGET_KEY, indicator);
+      }
+    }
     refreshStatus();
   });
 
@@ -151,7 +165,12 @@ export default function (pi) {
       clearInterval(timer);
       timer = null;
     }
-    if (ui) ui.setWidget(WIDGET_KEY, undefined);
+    // Only the path that put the widget there takes it away again.
+    if (ui) {
+      if (shared) leaveStatusRow(ui, WIDGET_KEY);
+      else ui.setWidget(WIDGET_KEY, undefined);
+    }
+    shared = false;
     ui = null;
     tui = null;
   });
